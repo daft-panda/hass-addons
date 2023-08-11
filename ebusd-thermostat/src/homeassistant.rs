@@ -1,8 +1,9 @@
 use anyhow::bail;
 use futures_util::{SinkExt, StreamExt};
-use log::trace;
+use log::{error, trace};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 use time::OffsetDateTime;
@@ -13,53 +14,53 @@ use tokio_tungstenite::tungstenite::Message::Text;
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(transparent)]
 pub struct Namespaces {
-    namespaces: Vec<Devices>,
+    pub(crate) namespaces: Vec<Devices>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Devices {
     #[serde(flatten)]
-    devices: HashMap<String, Device>,
+    pub(crate) devices: HashMap<String, Device>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Device {
-    name: String,
-    entities: Vec<Vec<String>>,
+    pub(crate) name: String,
+    pub(crate) entities: Vec<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct HaMessage {
-    id: u8,
+    pub(crate) id: u8,
     #[serde(alias = "type")]
-    msg_type: String,
-    event: Event,
+    pub(crate) msg_type: String,
+    pub(crate) event: Event,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Event {
-    event_type: String,
-    data: EventData,
-    origin: String,
+    pub(crate) event_type: String,
+    pub(crate) data: EventData,
+    pub(crate) origin: String,
     #[serde(with = "time::serde::rfc3339")]
-    time_fired: OffsetDateTime,
+    pub(crate) time_fired: OffsetDateTime,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct EventData {
-    old_state: State,
-    new_state: State,
+    pub(crate) old_state: State,
+    pub(crate) new_state: State,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct State {
-    entity_id: String,
-    state: String,
-    attributes: HashMap<String, String>,
+    pub(crate) entity_id: String,
+    pub(crate) state: Value,
+    pub(crate) attributes: HashMap<String, Value>,
     #[serde(with = "time::serde::rfc3339")]
-    last_changed: OffsetDateTime,
+    pub(crate) last_changed: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
-    last_updated: OffsetDateTime,
+    pub(crate) last_updated: OffsetDateTime,
 }
 
 pub struct Api {
@@ -81,7 +82,7 @@ impl Api {
         let template = "{\"template\": \"{% set devices = states | map(attribute='entity_id') | map('device_id') | unique | reject('eq',None) | list %}{%- set ns = namespace(devices = []) %}{%- for device in devices %} {%- set entities = device_entities(device) | list %}{%- if entities %}{%- set ns.devices = ns.devices +  [ {device: {\\\"name\\\": device_attr(device, \\\"name\\\"), \\\"entities\\\":[entities ]}} ] %}{%- endif %}{%- endfor %}{{ ns.devices }}\"}";
         let req = self
             .client
-            .post(Url::from_str(&*format!(
+            .post(Url::from_str(&format!(
                 "http://{}/api/template",
                 self.url.clone()
             ))?)
@@ -105,7 +106,7 @@ impl Api {
     }
 
     pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
-        let url = Url::parse(&*format!("ws://{}/api/websocket", self.url.clone()))?;
+        let url = Url::parse(&format!("ws://{}/api/websocket", self.url.clone()))?;
         let (ws, _) = connect_async(url).await?;
         let (mut write, mut read) = ws.split();
         // await auth required message
@@ -113,10 +114,10 @@ impl Api {
         if let Text(str) = msg {
             trace!("{}", str);
             if !str.contains("auth_required") {
-                bail!("invalid ws handshake");
+                bail!("Invalid ws handshake");
             }
         } else {
-            bail!("invalid ws handshake");
+            bail!("Invalid ws handshake");
         }
 
         write
@@ -127,7 +128,7 @@ impl Api {
   "access_token": "blurg"
 }
         "#
-                .replace("blurg", &*self.bearer_token),
+                .replace("blurg", &self.bearer_token),
             ))
             .await?;
 
@@ -135,10 +136,10 @@ impl Api {
         if let Text(str) = msg {
             trace!("{}", str);
             if !str.contains("auth_ok") {
-                bail!("invalid ws auth credentials: {:?}", str);
+                bail!("Invalid ws auth credentials: {:?}", str);
             }
         } else {
-            bail!("invalid ws handshake");
+            bail!("Invalid ws handshake");
         }
 
         write
@@ -158,21 +159,29 @@ impl Api {
         if let Text(str) = msg {
             trace!("{}", str);
             if !str.contains("success\":true") {
-                bail!("failed to subscribe: {:?}", str);
+                bail!("Failed to subscribe: {:?}", str);
             }
         } else {
-            bail!("unexpected ws message type: {:?}", msg);
+            bail!("Unexpected ws message type: {:?}", msg);
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(10);
 
-        read.for_each(|msg| async {
-            let msg = msg.unwrap().into_text().unwrap();
-            let ha_msg: HaMessage = serde_json::from_str(&*msg).unwrap();
-            trace!("{:?}", ha_msg);
-            tx.send(ha_msg.event).await.unwrap();
-        })
-        .await;
+        tokio::spawn(async move {
+            read.for_each(|msg| async {
+                let msg = msg.unwrap().into_text().unwrap();
+                let ha_msg: HaMessage = match serde_json::from_str(&msg) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("Failed to unmarshal HA state update: {}\n{}", e, msg);
+                        return;
+                    }
+                };
+                trace!("State update event: {:?}", ha_msg);
+                tx.send(ha_msg.event).await.unwrap();
+            })
+            .await;
+        });
 
         Ok(rx)
     }
