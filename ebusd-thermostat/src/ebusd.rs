@@ -1,4 +1,4 @@
-use crate::HeaterMode;
+use crate::HeaterSettings;
 use anyhow::bail;
 use log::{debug, trace};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,7 +20,7 @@ impl Ebusd {
     }
     pub async fn define_message(&mut self, message_definition: String) -> anyhow::Result<()> {
         self.connection
-            .write_all(format!("define -r {}\n\n", message_definition).as_bytes())
+            .write_all(format!("define -r {}\n", message_definition).as_bytes())
             .await?;
 
         let mut buffer = [0; 1024];
@@ -35,11 +35,12 @@ impl Ebusd {
         }
     }
 
-    pub async fn set_mode(&mut self, mode: HeaterMode) -> anyhow::Result<()> {
+    pub async fn set_mode(&mut self, mode: HeaterSettings) -> anyhow::Result<()> {
         let arg = mode.into_cmd_arg();
-        trace!("Setting mode {}", arg);
+        debug!("Setting mode {}", arg);
+        let cmd = format!("w -c bai SetModeOverride {}\n", arg);
         self.connection
-            .write_all(format!("w -c bai SetModeOverride {}\n\n", arg).as_bytes())
+            .write_all(cmd.as_bytes())
             .await?;
 
         let mut buffer = [0; 1024];
@@ -50,7 +51,7 @@ impl Ebusd {
         if result.contains("done") {
             Ok(())
         } else {
-            bail!("{}", result);
+            bail!("Set mode {} failed: {}", arg, result);
         }
     }
 }

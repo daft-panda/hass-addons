@@ -3,9 +3,9 @@ mod homeassistant;
 
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
-use anyhow::bail;
-use log::{debug, error, LevelFilter};
-use rumqttc::{AsyncClient, EventLoop, MqttOptions, QoS};
+use anyhow::{anyhow, bail};
+use log::{debug, error, info, LevelFilter};
+use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde_json::Value;
 use std::str::FromStr;
 use tokio::sync::mpsc::{channel, Receiver};
@@ -15,7 +15,7 @@ use tokio::{pin, select};
 #[tokio::main]
 async fn main() {
     env_logger::builder()
-        .filter(None, LevelFilter::Trace)
+        .filter(None, LevelFilter::Debug)
         .init();
 
     let mut thermostat = match Thermostat::new(
@@ -72,8 +72,38 @@ impl Default for TemperaturePreferences {
 }
 
 #[derive(Clone, Debug)]
-pub struct HeaterMode {
-    hc_mode: String,
+pub enum HeaterMode {
+    AUTO,
+    HEAT,
+    OFF,
+}
+
+impl ToString for HeaterMode {
+    fn to_string(&self) -> String {
+        match self {
+            HeaterMode::AUTO => String::from("0"),
+            HeaterMode::HEAT => String::from("0"),
+            HeaterMode::OFF => String::from("off"),
+        }
+    }
+}
+
+impl FromStr for HeaterMode {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, ()> {
+        match s {
+            "auto" => Ok(HeaterMode::AUTO),
+            "heat" => Ok(HeaterMode::HEAT),
+            "off" => Ok(HeaterMode::OFF),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HeaterSettings {
+    hc_mode: HeaterMode,
     flow_temp_desired: u8,
     hwc_temp_desired: u8,
     hwc_flow_temp_desired: Option<u8>,
@@ -81,11 +111,11 @@ pub struct HeaterMode {
     disable_hwc_load: bool,
 }
 
-impl HeaterMode {
+impl HeaterSettings {
     pub fn into_cmd_arg(self) -> String {
         format!(
             "{};{};{};{};-;{};0;{};-;0;0;0",
-            self.hc_mode,
+            self.hc_mode.to_string(),
             self.flow_temp_desired,
             self.hwc_temp_desired,
             if let Some(v) = self.hwc_flow_temp_desired {
@@ -99,10 +129,10 @@ impl HeaterMode {
     }
 }
 
-impl Default for HeaterMode {
+impl Default for HeaterSettings {
     fn default() -> Self {
         Self {
-            hc_mode: "0".to_string(),
+            hc_mode: HeaterMode::AUTO,
             flow_temp_desired: 0,
             hwc_temp_desired: 0,
             hwc_flow_temp_desired: None,
@@ -119,7 +149,7 @@ pub struct Thermostat {
     mqtt_eventloop: EventLoop,
     thermometer_entity: String,
     prefs: TemperaturePreferences,
-    active_mode: HeaterMode,
+    active_mode: HeaterSettings,
     current_temperature: f32,
     last_mode_set_time: Option<Instant>,
     mode_set_fails: u8,
@@ -171,7 +201,7 @@ impl Thermostat {
             mqtt_client: client,
             mqtt_eventloop: eventloop,
             prefs: TemperaturePreferences::default(),
-            active_mode: HeaterMode::default(),
+            active_mode: HeaterSettings::default(),
             last_mode_set_time: None,
             current_temperature: 0.0,
             mode_set_fails: 0,
@@ -180,7 +210,7 @@ impl Thermostat {
 
     pub async fn run(&mut self) -> anyhow::Result<()> {
         self.mqtt_client
-            .subscribe("ebusd-thermostat/", QoS::AtLeastOnce)
+            .subscribe("ebusd-thermostat/#", QoS::AtLeastOnce)
             .await
             .unwrap();
 
@@ -216,6 +246,8 @@ impl Thermostat {
                         continue;
                     }
                     let temp = temp.unwrap();
+                    self.mqtt_client.publish("ebusd-thermostat/temp", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
+                    debug!("Published MQTT update: {}", temp);
 
                     if temp == self.current_temperature {
                         continue;
@@ -249,12 +281,14 @@ impl Thermostat {
                         self.set_mode().await?;
                         update_pending = false;
                     }
+
+                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(9999999999999));
                 }
             }
         }
     }
 
-    fn update_mode(&mut self, current_temp: f32) -> Option<HeaterMode> {
+    fn update_mode(&mut self, current_temp: f32) -> Option<HeaterSettings> {
         if self.active_mode.flow_temp_desired == 0 {
             // heater is currently inactive
             if current_temp <= self.prefs.low_watermark {
@@ -290,7 +324,7 @@ impl Thermostat {
         Ok(())
     }
 
-    fn set_active_mode(&mut self, mode: HeaterMode) {
+    fn set_active_mode(&mut self, mode: HeaterSettings) {
         self.active_mode = mode;
     }
 
@@ -336,7 +370,54 @@ impl Thermostat {
         Ok(rx)
     }
 
-    pub async fn handle_mqtt_message(&mut self, event: rumqttc::Event) -> anyhow::Result<()> {
+    pub async fn handle_mqtt_message(&mut self, event: Event) -> anyhow::Result<()> {
+        match event {
+            Event::Incoming(v) => match v {
+                Incoming::Publish(publish) => {
+                    let topic_parts: Vec<&str> = publish.topic.split('/').collect();
+                    match topic_parts[1] {
+                        "temp" => {
+                            if topic_parts.len() <= 2 {
+                                return Ok(());
+                            }
+
+                            match topic_parts[2] {
+                                "set" => {
+                                    self.prefs.set_point = f32::from_str(&String::from_utf8(
+                                        publish.payload.to_vec(),
+                                    )?)?;
+                                    info!("New temp set point: {}", self.prefs.set_point);
+                                }
+                                _ => {}
+                            }
+                        }
+                        "mode" => {
+                            if topic_parts.len() <= 2 {
+                                return Ok(());
+                            }
+
+                            match topic_parts[2] {
+                                "set" => {
+                                    self.active_mode.hc_mode = HeaterMode::from_str(
+                                        String::from_utf8(publish.payload.to_vec())?.as_str(),
+                                    ).map_err(|_| anyhow!("Invalid heater mode"))?;
+                                    info!(
+                                        "New heater mode: {}",
+                                        self.active_mode.hc_mode.to_string()
+                                    )
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
+            },
+            Event::Outgoing(v) => {
+                debug!("OUT {:?}", v);
+            }
+        }
         Ok(())
     }
 }
