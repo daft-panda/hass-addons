@@ -39,9 +39,7 @@ impl Ebusd {
         let arg = mode.into_cmd_arg();
         debug!("Setting mode {}", arg);
         let cmd = format!("w -c bai SetModeOverride {}\n", arg);
-        self.connection
-            .write_all(cmd.as_bytes())
-            .await?;
+        self.connection.write_all(cmd.as_bytes()).await?;
 
         let mut buffer = [0; 1024];
         let bytes_read = self.connection.read(&mut buffer).await?;
@@ -53,5 +51,10 @@ impl Ebusd {
         } else {
             bail!("Set mode {} failed: {}", arg, result);
         }
+    }
+
+    pub async fn reconnect(&mut self) -> anyhow::Result<()> {
+        self.connection = TcpStream::connect(self.endpoint.clone()).await?;
+        Ok(())
     }
 }

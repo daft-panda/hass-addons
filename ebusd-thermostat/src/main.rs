@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::str::FromStr;
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio::time::{sleep, Duration, Instant};
-use tokio::{pin, select};
+use tokio::{io, pin, select};
 
 #[tokio::main]
 async fn main() {
@@ -282,7 +282,7 @@ impl Thermostat {
                         update_pending = false;
                     }
 
-                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(9999999999999));
+                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
                 }
             }
         }
@@ -314,6 +314,18 @@ impl Thermostat {
             Err(e) => {
                 error!("Failed setting mode: {:?}", e);
                 self.mode_set_fails += 1;
+
+                match e.downcast_ref::<io::Error>() {
+                    None => {}
+                    Some(e) => {
+                        debug!("Original error: {}", e.to_string());
+                        if e.to_string().to_lowercase().contains("broken pipe") {
+                            debug!("Reconnecting...");
+                            self.ebusd.reconnect().await?;
+                            self.ebusd.define_message( "wi,BAI,SetModeOverride,Betriebsart,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
+                        }
+                    }
+                }
 
                 if self.mode_set_fails > 5 {
                     panic!("Ebus mode setting failed 5+ times, exiting");
@@ -400,7 +412,8 @@ impl Thermostat {
                                 "set" => {
                                     self.active_mode.hc_mode = HeaterMode::from_str(
                                         String::from_utf8(publish.payload.to_vec())?.as_str(),
-                                    ).map_err(|_| anyhow!("Invalid heater mode"))?;
+                                    )
+                                    .map_err(|_| anyhow!("Invalid heater mode"))?;
                                     info!(
                                         "New heater mode: {}",
                                         self.active_mode.hc_mode.to_string()
