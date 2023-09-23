@@ -319,7 +319,8 @@ impl Thermostat {
                     None => {}
                     Some(e) => {
                         debug!("Original error: {}", e.to_string());
-                        if e.to_string().to_lowercase().contains("broken pipe") {
+                        let msg = e.to_string().to_lowercase();
+                        if msg.contains("broken pipe") || msg.contains("connection") {
                             debug!("Reconnecting...");
                             self.ebusd.reconnect().await?;
                             self.ebusd.define_message( "wi,BAI,SetModeOverride,Betriebsart,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;

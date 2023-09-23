@@ -1,6 +1,6 @@
 use anyhow::bail;
 use futures_util::{SinkExt, StreamExt};
-use log::{error, trace};
+use log::{debug, error, trace};
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -169,7 +169,19 @@ impl Api {
 
         tokio::spawn(async move {
             read.for_each(|msg| async {
-                let msg = msg.unwrap().into_text().unwrap();
+                let msg = match msg {
+                    Ok(v) => match v.into_text() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            debug!("Failed to convert WS message into text: {}", e);
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        debug!("Failed to read WS message: {}", e);
+                        return;
+                    }
+                };
                 let ha_msg: HaMessage = match serde_json::from_str(&msg) {
                     Ok(v) => v,
                     Err(e) => {
