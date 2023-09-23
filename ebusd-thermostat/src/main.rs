@@ -20,7 +20,7 @@ async fn main() {
 
     let mut thermostat = match Thermostat::new(
         "homeassistant:8123".to_string(),
-        "".to_string(),
+        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI1MzMxM2Y3YTEwN2I0ZDNkYWZkNzdiNGFkNWUyMDRjYiIsImlhdCI6MTY5MTY5NDU4MSwiZXhwIjoyMDA3MDU0NTgxfQ.G7Wg08F9P272gouaZwI18PmwH3rmqgR1zJG7px3bco0".to_string(),
         "homeassistant:8888".to_string(),
         "sensor.multisensor_7_air_temperature_2".to_string(),
         "homeassistant".to_string(),
@@ -328,7 +328,8 @@ impl Thermostat {
                 }
 
                 if self.mode_set_fails > 5 {
-                    panic!("Ebus mode setting failed 5+ times, exiting");
+                    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
+                    self.mode_set_fails = 0;
                 }
             }
         }
