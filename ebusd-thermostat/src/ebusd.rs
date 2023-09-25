@@ -1,6 +1,6 @@
 use crate::HeaterSettings;
 use anyhow::bail;
-use log::{debug, trace};
+use log::debug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
