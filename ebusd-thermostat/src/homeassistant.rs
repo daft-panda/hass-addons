@@ -83,7 +83,7 @@ impl Api {
         let req = self
             .client
             .post(Url::from_str(&format!(
-                "http://{}/api/template",
+                "{}/api/template",
                 self.url.clone()
             ))?)
             .bearer_auth(self.bearer_token.clone())
@@ -106,7 +106,7 @@ impl Api {
     }
 
     pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
-        let url = Url::parse(&format!("ws://{}/api/websocket", self.url.clone()))?;
+        let url = Url::parse(&format!("{}/websocket", self.url.clone()))?;
         let (ws, _) = connect_async(url).await?;
         let (mut write, mut read) = ws.split();
         // await auth required message
