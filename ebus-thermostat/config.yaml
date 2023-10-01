@@ -25,7 +25,7 @@ schema:
   ha_api_token: "str?"
   ebusd_address: str
   thermometer_entity: str
-  tap_water_temp: "int(0, 80)"
+  tap_water_temp: "int(0,80)"
   mqtt_host: "str?"
   mqtt_username: "str?"
   mqtt_password: "str?"
