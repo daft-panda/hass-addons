@@ -57,13 +57,9 @@ async fn main() {
         }
     };
 
-    thermostat.set_temp_preference(TemperaturePreferences {
-        low_watermark: 26.9,
-        high_watermark: 27.1,
-        set_point: 27.0,
-        maintain_state_for: Default::default(),
-        tap_water_set_point: 55.0,
-    });
+    let mut tp = TemperaturePreferences::default();
+    tp.tap_water_set_point = options.tap_water_temp as f32;
+    thermostat.set_temp_preference(tp);
 
     match thermostat.run().await {
         Ok(_) => {}
@@ -511,6 +507,7 @@ pub struct Options {
     ha_api_token: Option<String>,
     ebusd_address: String,
     thermometer_entity: String,
+    tap_water_temp: u8,
     mqtt_host: String,
     mqtt_username: String,
     mqtt_password: String,
