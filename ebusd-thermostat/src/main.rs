@@ -3,7 +3,7 @@ mod homeassistant;
 
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use log::{debug, error, info, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::str::FromStr;
 use std::{env, fs};
-use tokio::sync::mpsc::{channel, Receiver};
+use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 use tokio::{io, pin, select};
 
@@ -171,10 +171,12 @@ pub struct Thermostat {
     mqtt_password: String,
     thermometer_entity: String,
     prefs: TemperaturePreferences,
-    active_mode: HeaterSettings,
+    settings: HeaterSettings,
     current_temperature: f32,
     last_mode_set_time: Option<Instant>,
-    mode_set_fails: u8,
+    mqtt_tx: Sender<(String, String)>,
+    mqtt_rx: Option<Receiver<(String, String)>>,
+    set_fails: u8,
 }
 
 impl Thermostat {
@@ -210,6 +212,8 @@ impl Thermostat {
         let mut ebusd = Ebusd::new(ebusd_address).await?;
         ebusd.define_message( "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
 
+        let (tx, rx) = channel(50);
+
         Ok(Self {
             ebusd,
             ha_api: api,
@@ -218,14 +222,16 @@ impl Thermostat {
             mqtt_username,
             mqtt_password,
             prefs: TemperaturePreferences::default(),
-            active_mode: HeaterSettings::default(),
+            settings: HeaterSettings::default(),
             last_mode_set_time: None,
             current_temperature: 0.0,
-            mode_set_fails: 0,
+            mqtt_tx: tx,
+            mqtt_rx: Some(rx),
+            set_fails: 0,
         })
     }
 
-    async fn mqtt_reconnect(&self) -> anyhow::Result<(AsyncClient, EventLoop)> {
+    async fn mqtt_reconnect(&self) -> Result<(AsyncClient, EventLoop)> {
         let mut mqttoptions = MqttOptions::new("ebusd-thermostat", self.mqtt_host.clone(), 1883);
         mqttoptions.set_keep_alive(Duration::from_secs(5));
         mqttoptions.set_credentials(self.mqtt_username.clone(), self.mqtt_password.clone());
@@ -239,18 +245,20 @@ impl Thermostat {
         Ok((client, eventloop))
     }
 
-    pub async fn run(&mut self) -> anyhow::Result<()> {
+    pub async fn run(&mut self) -> Result<()> {
         let (mut client, mut mqtt_eventloop) = self.mqtt_reconnect().await?;
 
         let mut temp_rx = self.temperature_changes().await?;
+        let mut mqtt_rx = self.mqtt_rx.take().unwrap();
 
         let hold_timer = sleep(self.prefs.maintain_state_for);
         pin!(hold_timer);
         let mut hold = false;
         let mut update_pending = false;
+        let mut retries = 0;
 
-        self.active_mode.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
-        self.set_mode().await?;
+        self.settings.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
+        self.apply_settings().await?;
 
         loop {
             let mut repeat_timer = Duration::from_secs(5 * 60);
@@ -266,6 +274,11 @@ impl Thermostat {
                         }
                         Err(e) => {
                             error!("MQTT error: {:?}", e);
+                            retries += 1;
+                            if retries > 5 {
+                                tokio::time::sleep(Duration::from_secs(60)).await;
+                                retries = 0;
+                            }
                             (client, mqtt_eventloop) = self.mqtt_reconnect().await?;
                         }
                     }
@@ -293,21 +306,26 @@ impl Thermostat {
                             hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
                             hold = true;
                             debug!("Setting active mode");
-                            self.set_mode().await?;
+                            self.apply_settings().await?;
                         }
+                    }
+                }
+                m = mqtt_rx.recv() => {
+                    if let Some((topic, msg)) = m {
+                        client.publish(format!("ebusd-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await?;
                     }
                 }
                 // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins
                 _ = sleep(repeat_timer) => {
                     debug!("Repeating mode");
-                    self.set_mode().await?;
+                    self.apply_settings().await?;
                 }
                 _ = &mut hold_timer => {
                     hold = false;
 
                     if update_pending {
                         debug!("Setting mode after hold timer");
-                        self.set_mode().await?;
+                        self.apply_settings().await?;
                         update_pending = false;
                     }
 
@@ -318,31 +336,53 @@ impl Thermostat {
     }
 
     fn update_mode(&mut self, current_temp: f32) -> Option<HeaterSettings> {
-        if self.active_mode.flow_temp_desired == 0 {
+        if self.settings.flow_temp_desired == 0 {
             // heater is currently inactive
             if current_temp <= self.prefs.low_watermark {
-                self.active_mode.flow_temp_desired = 60;
-                return Some(self.active_mode.clone());
+                self.settings.flow_temp_desired = 60;
+                return Some(self.settings.clone());
             }
-        } else if self.active_mode.flow_temp_desired != 0 {
+        } else if self.settings.flow_temp_desired != 0 {
             // heater is active
             if current_temp >= self.prefs.high_watermark {
-                self.active_mode.flow_temp_desired = 0;
-                return Some(self.active_mode.clone());
+                self.settings.flow_temp_desired = 0;
+                return Some(self.settings.clone());
             }
         }
 
         None
     }
 
-    async fn set_mode(&mut self) -> anyhow::Result<()> {
-        match self.ebusd.set_mode(self.active_mode.clone()).await {
+    async fn publish_settings(&self) -> Result<()> {
+        self.mqtt_tx
+            .send(("mode".to_string(), self.settings.hc_mode.to_string()))
+            .await?;
+        self.mqtt_tx
+            .send((
+                "temp/low".to_string(),
+                format!("{}", self.prefs.low_watermark),
+            ))
+            .await?;
+        self.mqtt_tx
+            .send((
+                "temp/high".to_string(),
+                format!("{}", self.prefs.high_watermark),
+            ))
+            .await?;
+        self.mqtt_tx
+            .send(("temp".to_string(), format!("{}", self.prefs.set_point)))
+            .await?;
+        Ok(())
+    }
+
+    async fn apply_settings(&mut self) -> Result<()> {
+        match self.ebusd.apply_settings(self.settings.clone()).await {
             Ok(_) => {
-                self.mode_set_fails = 0;
+                self.set_fails = 0;
             }
             Err(e) => {
-                error!("Failed setting mode: {:?}", e);
-                self.mode_set_fails += 1;
+                error!("Failed applying settings: {:?}", e);
+                self.set_fails += 1;
 
                 match e.downcast_ref::<io::Error>() {
                     None => {}
@@ -352,30 +392,27 @@ impl Thermostat {
                         if msg.contains("broken pipe") || msg.contains("connection") {
                             debug!("Reconnecting...");
                             self.ebusd.reconnect().await?;
-                            self.ebusd.define_message( "wi,BAI,SetModeOverride,Betriebsart,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
+                            self.ebusd.define_message( "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
                         }
                     }
                 }
 
-                if self.mode_set_fails > 5 {
+                if self.set_fails > 5 {
                     tokio::time::sleep(Duration::from_secs(10 * 60)).await;
-                    self.mode_set_fails = 0;
+                    self.set_fails = 0;
                 }
             }
         }
         self.last_mode_set_time = Some(Instant::now());
+        self.publish_settings().await?;
         Ok(())
-    }
-
-    fn set_active_mode(&mut self, mode: HeaterSettings) {
-        self.active_mode = mode;
     }
 
     fn set_temp_preference(&mut self, prefs: TemperaturePreferences) {
         self.prefs = prefs;
     }
 
-    pub async fn temperature_changes(&self) -> anyhow::Result<Receiver<f32>> {
+    pub async fn temperature_changes(&self) -> Result<Receiver<f32>> {
         let mut event_rx = self.ha_api.state_updates().await?;
         let (tx, rx) = channel(10);
         let thermometer_entity = self.thermometer_entity.clone();
@@ -413,7 +450,7 @@ impl Thermostat {
         Ok(rx)
     }
 
-    pub async fn handle_mqtt_message(&mut self, event: Event) -> anyhow::Result<()> {
+    pub async fn handle_mqtt_message(&mut self, event: Event) -> Result<()> {
         match event {
             Event::Incoming(v) => match v {
                 Incoming::Publish(publish) => {
@@ -430,6 +467,7 @@ impl Thermostat {
                                         publish.payload.to_vec(),
                                     )?)?;
                                     info!("New temp set point: {}", self.prefs.set_point);
+                                    self.publish_settings().await?;
                                 }
                                 _ => {}
                             }
@@ -441,20 +479,21 @@ impl Thermostat {
 
                             match topic_parts[2] {
                                 "set" => {
-                                    self.active_mode.hc_mode = HeaterMode::from_str(
+                                    self.settings.hc_mode = HeaterMode::from_str(
                                         String::from_utf8(publish.payload.to_vec())?.as_str(),
                                     )
                                     .map_err(|_| anyhow!("Invalid heater mode"))?;
-                                    info!(
-                                        "New heater mode: {}",
-                                        self.active_mode.hc_mode.to_string()
-                                    )
+                                    info!("New heater mode: {}", self.settings.hc_mode.to_string());
+                                    self.apply_settings().await?;
                                 }
                                 _ => {}
                             }
                         }
                         _ => {}
                     }
+                }
+                Incoming::Disconnect => {
+                    bail!("MQTT disconnect")
                 }
                 _ => {}
             },

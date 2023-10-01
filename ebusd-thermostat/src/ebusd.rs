@@ -35,7 +35,7 @@ impl Ebusd {
         }
     }
 
-    pub async fn set_mode(&mut self, mode: HeaterSettings) -> anyhow::Result<()> {
+    pub async fn apply_settings(&mut self, mode: HeaterSettings) -> anyhow::Result<()> {
         let arg = mode.into_cmd_arg();
         debug!("Setting mode {}", arg);
         let cmd = format!("w -c bai SetModeOverride {}\n", arg);
