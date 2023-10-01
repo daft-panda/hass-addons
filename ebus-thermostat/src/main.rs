@@ -69,6 +69,7 @@ async fn main() {
 
 #[derive(Clone, Debug)]
 pub struct TemperaturePreferences {
+    temperature_band: f32,
     low_watermark: f32,
     high_watermark: f32,
     set_point: f32,
@@ -79,6 +80,7 @@ pub struct TemperaturePreferences {
 impl Default for TemperaturePreferences {
     fn default() -> Self {
         TemperaturePreferences {
+            temperature_band: 1.0,
             low_watermark: 19.0,
             high_watermark: 23.0,
             set_point: 22.0,
@@ -473,6 +475,10 @@ impl Thermostat {
                                         publish.payload.to_vec(),
                                     )?)?;
                                     info!("New temp set point: {}", self.prefs.set_point);
+                                    self.prefs.low_watermark =
+                                        self.prefs.set_point - self.prefs.temperature_band;
+                                    self.prefs.high_watermark =
+                                        self.prefs.set_point + self.prefs.temperature_band;
                                     self.publish_settings().await?;
                                 }
                                 _ => {}
@@ -517,6 +523,7 @@ pub struct Options {
     ha_api_token: Option<String>,
     ebusd_address: String,
     thermometer_entity: String,
+    temperature_band: u8,
     tap_water_temp: u8,
     mqtt_host: String,
     mqtt_username: String,
