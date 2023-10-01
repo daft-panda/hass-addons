@@ -294,7 +294,7 @@ impl Thermostat {
                         continue;
                     }
                     let temp = temp.unwrap();
-                    client.publish("ebus-thermostat/temp", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
+                    client.publish("ebus-thermostat/temp/current", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
                     debug!("Published MQTT update: {}", temp);
 
                     if temp == self.current_temperature {
