@@ -523,7 +523,7 @@ pub struct Options {
     ha_api_token: Option<String>,
     ebusd_address: String,
     thermometer_entity: String,
-    temperature_band: u8,
+    temperature_band: f32,
     tap_water_temp: u8,
     mqtt_host: String,
     mqtt_username: String,
