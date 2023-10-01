@@ -95,11 +95,21 @@ pub enum HeaterMode {
     OFF,
 }
 
-impl ToString for HeaterMode {
-    fn to_string(&self) -> String {
+impl HeaterMode {
+    fn to_command_value(&self) -> String {
         match self {
             HeaterMode::AUTO => String::from("0"),
             HeaterMode::HEAT => String::from("0"),
+            HeaterMode::OFF => String::from("off"),
+        }
+    }
+}
+
+impl ToString for HeaterMode {
+    fn to_string(&self) -> String {
+        match self {
+            HeaterMode::AUTO => String::from("auto"),
+            HeaterMode::HEAT => String::from("heat"),
             HeaterMode::OFF => String::from("off"),
         }
     }
@@ -132,7 +142,7 @@ impl HeaterSettings {
     pub fn into_cmd_arg(self) -> String {
         format!(
             "{};{};{};{};-;{};0;{};-;0;0;0",
-            self.hc_mode.to_string(),
+            self.hc_mode.to_command_value(),
             self.flow_temp_desired,
             self.hwc_temp_desired,
             if let Some(v) = self.hwc_flow_temp_desired {
