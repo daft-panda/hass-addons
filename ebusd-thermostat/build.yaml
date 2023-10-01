@@ -8,4 +8,3 @@ labels:
   org.opencontainers.image.description: "Control your ebus heater connected via ebusd"
   org.opencontainers.image.source: "https://github.com/wannes-ds/hass-addons"
   org.opencontainers.image.licenses: "Apache License 2.0"
-args:
