@@ -1,4 +1,4 @@
-# ebusd thermostat 🌡️
+# ebus thermostat 🌡️
 
 ## What
 
@@ -42,14 +42,14 @@ starting the thermostat.
          - auto
          - heat
          - "off"
-       mode_state_topic: "ebusd-thermostat/mode"
-       mode_command_topic: "ebusd-thermostat/mode/set"
-       temperature_state_topic: "ebusd-thermostat/temp"
-       temperature_low_state_topic: ebusd-thermostat/temp/low"
-       temperature_high_state_topic: "ebusd-thermostat/temp/high"
-       temperature_low_command_topic: "ebusd-thermostat/temp/low/set"
-       temperature_high_command_topic: "ebusd-thermostat/temp/high/set"
-       current_temperature_topic: "ebusd-thermostat/temp"
+       mode_state_topic: "ebus-thermostat/mode"
+       mode_command_topic: "ebus-thermostat/mode/set"
+       temperature_state_topic: "ebus-thermostat/temp"
+       temperature_low_state_topic: ebus-thermostat/temp/low"
+       temperature_high_state_topic: "ebus-thermostat/temp/high"
+       temperature_low_command_topic: "ebus-thermostat/temp/low/set"
+       temperature_high_command_topic: "ebus-thermostat/temp/high/set"
+       current_temperature_topic: "ebus-thermostat/temp"
 ```
 5. Configure the thermostat plugin in HA
 6. Enjoy the heat 🔥

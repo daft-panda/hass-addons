@@ -1,4 +1,4 @@
 # https://developers.home-assistant.io/docs/add-ons/repository#repository-configuration
 name: Wannes' HA addons repo
-url: 'https://github.com/wannes-ds/hass-addons'
+url: 'https://github.com/daft-panda/hass-addons'
 maintainer: Wannes <wannes321@gmail.com>

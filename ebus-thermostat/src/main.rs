@@ -228,14 +228,14 @@ impl Thermostat {
     }
 
     async fn mqtt_reconnect(&self) -> Result<(AsyncClient, EventLoop)> {
-        let mut mqttoptions = MqttOptions::new("ebusd-thermostat", self.mqtt_host.clone(), 1883);
+        let mut mqttoptions = MqttOptions::new("ebus-thermostat", self.mqtt_host.clone(), 1883);
         mqttoptions.set_keep_alive(Duration::from_secs(5));
         mqttoptions.set_credentials(self.mqtt_username.clone(), self.mqtt_password.clone());
 
         let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
 
         client
-            .subscribe("ebusd-thermostat/#", QoS::AtLeastOnce)
+            .subscribe("ebus-thermostat/#", QoS::AtLeastOnce)
             .await?;
 
         Ok((client, eventloop))
@@ -284,7 +284,7 @@ impl Thermostat {
                         continue;
                     }
                     let temp = temp.unwrap();
-                    client.publish("ebusd-thermostat/temp", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
+                    client.publish("ebus-thermostat/temp", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
                     debug!("Published MQTT update: {}", temp);
 
                     if temp == self.current_temperature {
@@ -308,7 +308,7 @@ impl Thermostat {
                 }
                 m = mqtt_rx.recv() => {
                     if let Some((topic, msg)) = m {
-                        client.publish(format!("ebusd-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await?;
+                        client.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await?;
                     }
                 }
                 // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins

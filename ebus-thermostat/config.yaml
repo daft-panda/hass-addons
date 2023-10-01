@@ -10,6 +10,7 @@ arch:
 map:
   - config:rw
   - ssl
+image: "ghcr.io/daft-panda/ha-addon-ebus-thermostat-{arch}"
 homeassistant_api: true
 options:
   ha_api_address: "http://supervisor/core"

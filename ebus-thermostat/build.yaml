@@ -4,7 +4,7 @@ build_from:
   amd64: "ghcr.io/home-assistant/amd64-base:3.18"
   i386: "ghcr.io/home-assistant/i386-base:3.18"
 labels:
-  org.opencontainers.image.title: "ebusd thermostat"
+  org.opencontainers.image.title: "ebus thermostat"
   org.opencontainers.image.description: "Control your ebus heater connected via ebusd"
-  org.opencontainers.image.source: "https://github.com/wannes-ds/hass-addons"
+  org.opencontainers.image.source: "https://github.com/daft-panda/hass-addons"
   org.opencontainers.image.licenses: "Apache License 2.0"

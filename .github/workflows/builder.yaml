@@ -2,7 +2,7 @@ name: Builder
 
 env:
   BUILD_ARGS: "--test"
-  MONITORED_FILES: "build.yaml config.yaml Dockerfile rootfs"
+  MONITORED_FILES: "build.yaml config.yaml Dockerfile"
 
 on:
   push:
@@ -100,12 +100,12 @@ jobs:
 
       - name: Build ${{ matrix.addon }} add-on
         if: steps.check.outputs.build_arch == 'true'
-        uses: home-assistant/builder@2023.06.1
+        uses: home-assistant/builder@2023.09.1
         with:
           args: |
             ${{ env.BUILD_ARGS }} \
             --${{ matrix.arch }} \
             --target /data/${{ matrix.addon }} \
-            --image "${{ steps.check.outputs.image }}" \
+            --image "ha-addon-ebus-thermostat-${{ matrix.arch }}" \
             --docker-hub "ghcr.io/${{ github.repository_owner }}" \
             --addon

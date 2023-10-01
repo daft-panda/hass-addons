@@ -1,5 +1,5 @@
 # Wannes' HA addon repo
 
-## [ebusd-thermostat](./ebusd-thermostat)
+## [ebus-thermostat](./ebus-thermostat)
 
 
