@@ -1,5 +1,5 @@
 name: "ebusd thermostat"
-version: "1.0.0"
+version: "0.0.1"
 slug: ebusd_thermostat
 description: "Control your ebus heater connected via ebusd"
 init: false
