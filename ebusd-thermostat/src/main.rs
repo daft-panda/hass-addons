@@ -18,7 +18,7 @@ use tokio::{io, pin, select};
 #[tokio::main]
 async fn main() {
     env_logger::builder()
-        .filter(None, LevelFilter::Trace)
+        .filter(None, LevelFilter::Debug)
         .init();
 
     let options_file = Path::new("/data/options.json");
