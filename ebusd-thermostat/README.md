@@ -60,14 +60,15 @@ Example ebusd config using the HA addon:
 
 ## Why
 
-When switching to a more powerful heater, I could no longer use the old thermostat. Instead of buying a new expensive one,
-I just built it myself. This has the added advantage of being able to run the heating circuit at the desired temp. The
-Vaillant thermostat would call for ~52 C temp on the circuit, on cold days when this was not enough it could not be 
-bothered to increase the temps. With this, you can.
+When switching to a more powerful heater, I could no longer use the old thermostat. Instead of buying a new, expensive, one,
+I just built one myself. This has the added advantage of being able to run the heating circuit at any desired temp. The old
+Vaillant thermostat would only call for ~52 C temp on the circuit, on cold days this caused not enough of a temp difference for
+the radiators to be able to dump enough heat in the room and so the desired temp was never reached.
+With this thermostat, you can go up as high as you'd like.
 
 ## TODOs
 
-These are future ideas for refinement that might never be implemented. Help is appreciated!
+These are ideas for future refinements that might never be implemented. Help is appreciated!
 
 - Use heating circuit temp curve instead of static temp when desired temperature cannot be achieved in certain timespan
-- Make hot water temp configurable as an HA entity
+- Make hot water temp configurable as a HA entity
