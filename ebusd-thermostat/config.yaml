@@ -1,8 +1,8 @@
 name: "ebusd thermostat"
 version: "1.0.0"
-slug: folder
-description: >-
-  "Control your ebus heater connected via ebusd"
+slug: ebusd_thermostat
+description: "Control your ebus heater connected via ebusd"
+init: false
 arch:
   - i386
   - amd64
@@ -11,10 +11,8 @@ map:
   - config:rw
   - ssl
 homeassistant_api: true
-image: repo/{arch}-ebusd-thermostat
 options:
-  ha_api_address: "http://supervisor/core/"
-  ha_api_token: null
+  ha_api_address: "http://supervisor/core"
   ebusd_address: null
   thermometer_entity: null
   mqtt_host: "localhost"
@@ -22,7 +20,7 @@ options:
   mqtt_password: "mqtt"
 
 schema:
-  ha_api_address: str
+  ha_api_address: "str?"
   ha_api_token: "str?"
   ebusd_address: str
   thermometer_entity: str

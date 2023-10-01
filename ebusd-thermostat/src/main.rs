@@ -4,10 +4,13 @@ mod homeassistant;
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
 use anyhow::{anyhow, bail};
-use log::{debug, error, info, LevelFilter};
+use log::{debug, error, info, trace, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::path::Path;
 use std::str::FromStr;
+use std::{env, fs};
 use tokio::sync::mpsc::{channel, Receiver};
 use tokio::time::{sleep, Duration, Instant};
 use tokio::{io, pin, select};
@@ -15,17 +18,35 @@ use tokio::{io, pin, select};
 #[tokio::main]
 async fn main() {
     env_logger::builder()
-        .filter(None, LevelFilter::Debug)
+        .filter(None, LevelFilter::Trace)
         .init();
 
+    let options_file = Path::new("/data/options.json");
+    let options: Options =
+        serde_json::from_slice(fs::read(options_file).unwrap().as_slice()).unwrap();
+    debug!("Read options: {:?}", options);
+
     let mut thermostat = match Thermostat::new(
-        "homeassistant:8123".to_string(),
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiI1MzMxM2Y3YTEwN2I0ZDNkYWZkNzdiNGFkNWUyMDRjYiIsImlhdCI6MTY5MTY5NDU4MSwiZXhwIjoyMDA3MDU0NTgxfQ.G7Wg08F9P272gouaZwI18PmwH3rmqgR1zJG7px3bco0".to_string(),
-        "homeassistant:8888".to_string(),
-        "sensor.multisensor_7_air_temperature_2".to_string(),
-        "homeassistant".to_string(),
-        "mqtt".to_string(),
-        "mqtt".to_string(),
+        options
+            .ha_api_address
+            .unwrap_or_else(|| "http://supervisor/core".to_string()),
+        options
+            .ha_api_token
+            .unwrap_or_else(|| match env::var("SUPERVISOR_TOKEN") {
+                Ok(v) => v,
+                Err(_) => {
+                    error!("SUPERVISOR_TOKEN env var is not set\n Available env vars:");
+                    for (key, value) in env::vars() {
+                        error!("{key}: {value}");
+                    }
+                    panic!("Exiting");
+                }
+            }),
+        options.ebusd_address,
+        options.thermometer_entity,
+        options.mqtt_host,
+        options.mqtt_username,
+        options.mqtt_password,
     )
     .await
     {
@@ -187,7 +208,7 @@ impl Thermostat {
         }
 
         let mut ebusd = Ebusd::new(ebusd_address).await?;
-        ebusd.define_message( "wi,BAI,SetModeOverride,Betriebsart,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
+        ebusd.define_message( "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
 
         Ok(Self {
             ebusd,
@@ -443,4 +464,15 @@ impl Thermostat {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Options {
+    ha_api_address: Option<String>,
+    ha_api_token: Option<String>,
+    ebusd_address: String,
+    thermometer_entity: String,
+    mqtt_host: String,
+    mqtt_username: String,
+    mqtt_password: String,
 }

@@ -106,7 +106,7 @@ impl Api {
     }
 
     pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
-        let url = Url::parse(&format!("{}/api/websocket", self.url.clone()))?;
+        let url = Url::parse(&format!("{}/websocket", self.url.clone()))?;
         let (ws, _) = connect_async(url).await?;
         let (mut write, mut read) = ws.split();
         // await auth required message
