@@ -4,7 +4,7 @@ mod homeassistant;
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
 use anyhow::{anyhow, bail};
-use log::{debug, error, info, trace, LevelFilter};
+use log::{debug, error, info, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
