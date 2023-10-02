@@ -279,6 +279,7 @@ impl Thermostat {
                     match event {
                         Ok(ev) => {
                             self.handle_mqtt_message(ev).await?;
+                            retries = 0;
                         }
                         Err(e) => {
                             error!("MQTT error: {:?}", e);
@@ -287,7 +288,9 @@ impl Thermostat {
                                 tokio::time::sleep(Duration::from_secs(60)).await;
                                 retries = 0;
                             }
+                            debug!("MQTT reconnecting");
                             (client, mqtt_eventloop) = self.mqtt_reconnect().await?;
+                            info!("MQTT reconnected");
                         }
                     }
                 }
