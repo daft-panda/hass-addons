@@ -308,16 +308,16 @@ impl Thermostat {
                         self.current_temperature = temp;
                     }
 
-                    if let Some(mode_update) = self.update_mode(temp) {
+                    if let Some(mode_update) = self.update_heater_settings(temp) {
                         debug!("Active mode update: {:?}", mode_update);
                         if hold {
                             update_pending = true;
                             continue;
                         } else {
-                            hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
-                            hold = true;
                             debug!("Setting active mode");
                             self.apply_settings().await?;
+                            hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
+                            hold = true;
                         }
                     }
                 }
@@ -346,7 +346,7 @@ impl Thermostat {
         }
     }
 
-    fn update_mode(&mut self, current_temp: f32) -> Option<HeaterSettings> {
+    fn update_heater_settings(&mut self, current_temp: f32) -> Option<HeaterSettings> {
         if self.settings.flow_temp_desired == 0 {
             // heater is currently inactive
             if current_temp <= self.prefs.low_watermark {
@@ -499,6 +499,11 @@ impl Thermostat {
                                     )
                                     .map_err(|_| anyhow!("Invalid heater mode"))?;
                                     info!("New heater mode: {}", self.settings.hc_mode.to_string());
+
+                                    if self.current_temperature != 0.0 {
+                                        self.update_heater_settings(self.current_temperature);
+                                    }
+
                                     self.apply_settings().await?;
                                 }
                                 _ => {}
