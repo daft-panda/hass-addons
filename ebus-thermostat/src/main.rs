@@ -64,6 +64,7 @@ async fn main() {
 
     let tp = TemperaturePreferences {
         tap_water_set_point: options.tap_water_temp as f32,
+        temperature_band: options.temperature_band,
         ..Default::default()
     };
     thermostat.set_temp_preference(tp);
@@ -203,7 +204,7 @@ impl Thermostat {
         mqtt_host: String,
         mqtt_username: String,
         mqtt_password: String,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self> {
         let api = Api::new(ha_address, ha_api_token);
         // check if thermometer entity exists
         let devices = api.get_devices().await?;
