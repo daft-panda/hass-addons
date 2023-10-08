@@ -16,7 +16,7 @@ options:
   ebusd_address: null
   thermometer_entity: null
   tap_water_temp: 50
-  temperature_band: 1.0
+  temperature_band: 0.5
   mqtt_host: "localhost"
   mqtt_username: "mqtt"
   mqtt_password: "mqtt"

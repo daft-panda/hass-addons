@@ -4,6 +4,7 @@ mod homeassistant;
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
 use anyhow::{anyhow, bail, Result};
+use clap::Parser;
 use log::{debug, error, info, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
@@ -22,8 +23,12 @@ async fn main() {
         .init();
 
     let options_file = Path::new("/data/options.json");
-    let options: Options =
-        serde_json::from_slice(fs::read(options_file).unwrap().as_slice()).unwrap();
+    let options: Options = if options_file.exists() {
+        serde_json::from_slice(fs::read(options_file).unwrap().as_slice()).unwrap()
+    } else {
+        Options::parse()
+    };
+
     debug!("Read options: {:?}", options);
 
     let mut thermostat = match Thermostat::new(
@@ -57,8 +62,10 @@ async fn main() {
         }
     };
 
-    let mut tp = TemperaturePreferences::default();
-    tp.tap_water_set_point = options.tap_water_temp as f32;
+    let tp = TemperaturePreferences {
+        tap_water_set_point: options.tap_water_temp as f32,
+        ..Default::default()
+    };
     thermostat.set_temp_preference(tp);
 
     match thermostat.run().await {
@@ -241,7 +248,7 @@ impl Thermostat {
 
     async fn mqtt_reconnect(&self) -> Result<(AsyncClient, EventLoop)> {
         let mut mqttoptions = MqttOptions::new("ebus-thermostat", self.mqtt_host.clone(), 1883);
-        mqttoptions.set_keep_alive(Duration::from_secs(5));
+        mqttoptions.set_keep_alive(Duration::from_secs(30));
         mqttoptions.set_credentials(self.mqtt_username.clone(), self.mqtt_password.clone());
 
         let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
@@ -289,7 +296,17 @@ impl Thermostat {
                                 retries = 0;
                             }
                             debug!("MQTT reconnecting");
-                            (client, mqtt_eventloop) = self.mqtt_reconnect().await?;
+                            (client, mqtt_eventloop) = loop {
+                                 break match self.mqtt_reconnect().await {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        error!("Failed reconnecting to MQTT: {}", e);
+                                        tokio::time::sleep(Duration::from_secs(30)).await;
+                                        continue;
+                                    }
+                                }
+                            };
+
                             info!("MQTT reconnected");
                         }
                     }
@@ -525,15 +542,24 @@ impl Thermostat {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Parser, Debug, Serialize, Deserialize)]
 pub struct Options {
+    #[arg(long)]
     ha_api_address: Option<String>,
+    #[arg(long)]
     ha_api_token: Option<String>,
+    #[arg(long, default_value_t = String::new())]
     ebusd_address: String,
+    #[arg(long, default_value_t = String::new())]
     thermometer_entity: String,
+    #[arg(long, default_value_t = 0.5)]
     temperature_band: f32,
+    #[arg(long, default_value_t = 55)]
     tap_water_temp: u8,
+    #[arg(long)]
     mqtt_host: String,
+    #[arg(long)]
     mqtt_username: String,
+    #[arg(long)]
     mqtt_password: String,
 }
