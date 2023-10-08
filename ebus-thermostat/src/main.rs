@@ -70,8 +70,8 @@ async fn main() {
 #[derive(Clone, Debug)]
 pub struct TemperaturePreferences {
     temperature_band: f32,
-    low_watermark: f32,
-    high_watermark: f32,
+    lower_bound: f32,
+    higher_bound: f32,
     set_point: f32,
     maintain_state_for: Duration,
     tap_water_set_point: f32,
@@ -81,8 +81,8 @@ impl Default for TemperaturePreferences {
     fn default() -> Self {
         TemperaturePreferences {
             temperature_band: 1.0,
-            low_watermark: 19.0,
-            high_watermark: 23.0,
+            lower_bound: 19.0,
+            higher_bound: 23.0,
             set_point: 22.0,
             maintain_state_for: Duration::from_secs(60),
             tap_water_set_point: 45.0,
@@ -349,13 +349,13 @@ impl Thermostat {
     fn update_heater_settings(&mut self, current_temp: f32) -> Option<HeaterSettings> {
         if self.settings.flow_temp_desired == 0 {
             // heater is currently inactive
-            if current_temp <= self.prefs.low_watermark {
+            if current_temp <= self.prefs.lower_bound {
                 self.settings.flow_temp_desired = 60;
                 return Some(self.settings.clone());
             }
         } else if self.settings.flow_temp_desired != 0 {
             // heater is active
-            if current_temp >= self.prefs.high_watermark {
+            if current_temp >= self.prefs.higher_bound {
                 self.settings.flow_temp_desired = 0;
                 return Some(self.settings.clone());
             }
@@ -371,13 +371,13 @@ impl Thermostat {
         self.mqtt_tx
             .send((
                 "temp/low".to_string(),
-                format!("{}", self.prefs.low_watermark),
+                format!("{}", self.prefs.lower_bound),
             ))
             .await?;
         self.mqtt_tx
             .send((
                 "temp/high".to_string(),
-                format!("{}", self.prefs.high_watermark),
+                format!("{}", self.prefs.higher_bound),
             ))
             .await?;
         self.mqtt_tx
@@ -478,9 +478,9 @@ impl Thermostat {
                                         publish.payload.to_vec(),
                                     )?)?;
                                     info!("New temp set point: {}", self.prefs.set_point);
-                                    self.prefs.low_watermark =
+                                    self.prefs.lower_bound =
                                         self.prefs.set_point - self.prefs.temperature_band;
-                                    self.prefs.high_watermark =
+                                    self.prefs.higher_bound =
                                         self.prefs.set_point + self.prefs.temperature_band;
                                     self.publish_settings().await?;
                                 }

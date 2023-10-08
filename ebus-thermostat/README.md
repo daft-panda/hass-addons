@@ -30,26 +30,28 @@ starting the thermostat.
 3. Set the ebusd network port
 4. Add a MQTT thermostat to your HA configuration.yaml. Do not alter the topic names. Reload or restart HA when added.
 ```yaml
- mqtt:
-   climate:
-     - name: Heating
-       unique_id: Vaillant EcoTec Exclusive
-       max_temp: 23
-       min_temp: 20
-       precision: 0.1
-       temp_step: 0.5
-       modes:
-         - auto
-         - heat
-         - "off"
-       mode_state_topic: "ebus-thermostat/mode"
-       mode_command_topic: "ebus-thermostat/mode/set"
-       temperature_state_topic: "ebus-thermostat/temp"
-       temperature_low_state_topic: ebus-thermostat/temp/low"
-       temperature_high_state_topic: "ebus-thermostat/temp/high"
-       temperature_low_command_topic: "ebus-thermostat/temp/low/set"
-       temperature_high_command_topic: "ebus-thermostat/temp/high/set"
-       current_temperature_topic: "ebus-thermostat/temp"
+mqtt:
+  climate:
+    -   name: Heating
+        unique_id: Vaillant EcoTec Exclusive
+        retain: true
+        max_temp: 23
+        min_temp: 20
+        precision: 0.1
+        temp_step: 0.5
+        modes:
+            - auto
+            - heat
+            - "off"
+        mode_state_topic: "ebus-thermostat/mode"
+        mode_command_topic: "ebus-thermostat/mode/set"
+        temperature_state_topic: "ebus-thermostat/temp"
+        temperature_command_topic: "ebus-thermostat/temp/set"
+        temperature_low_state_topic: "ebus-thermostat/temp/low"
+        temperature_high_state_topic: "ebus-thermostat/temp/high"
+        temperature_low_command_topic: "ebus-thermostat/temp/low/set"
+        temperature_high_command_topic: "ebus-thermostat/temp/high/set"
+        current_temperature_topic: "ebus-thermostat/temp/current"
 ```
 5. Configure the thermostat plugin in HA
 6. Enjoy the heat 🔥
