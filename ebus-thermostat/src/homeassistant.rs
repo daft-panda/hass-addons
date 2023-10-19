@@ -65,14 +65,16 @@ pub struct State {
 
 pub struct Api {
     url: String,
+    ws_url: String,
     bearer_token: String,
     client: Client,
 }
 
 impl Api {
-    pub fn new(url: String, bearer_token: String) -> Self {
+    pub fn new(url: String, ws_url: String, bearer_token: String) -> Self {
         Self {
             url,
+            ws_url,
             bearer_token,
             client: Client::new(),
         }
@@ -108,7 +110,7 @@ impl Api {
     pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
         let url = Url::parse(&format!(
             "{}/websocket",
-            self.url.clone().replace("http", "ws")
+            self.ws_url.clone().replace("http", "ws")
         ))?;
         let (ws, _) = connect_async(url).await?;
         let (mut write, mut read) = ws.split();
@@ -185,6 +187,12 @@ impl Api {
                         return;
                     }
                 };
+
+                if msg.is_empty() {
+                    trace!("Empty WS message received");
+                    return;
+                }
+
                 let ha_msg: HaMessage = match serde_json::from_str(&msg) {
                     Ok(v) => v,
                     Err(e) => {

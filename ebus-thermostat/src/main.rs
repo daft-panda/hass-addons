@@ -23,18 +23,25 @@ async fn main() {
         .init();
 
     let options_file = Path::new("/data/options.json");
-    let options: Options = if options_file.exists() {
+    let mut options: Options = if options_file.exists() {
         serde_json::from_slice(fs::read(options_file).unwrap().as_slice()).unwrap()
     } else {
         Options::parse()
     };
 
+    if options.ha_api_address.is_none() {
+        options.ha_api_address = Some("http://supervisor/core".to_string());
+    }
+
+    if options.ha_ws_address.is_none() {
+        options.ha_ws_address = options.ha_api_address.clone();
+    }
+
     debug!("Read options: {:?}", options);
 
     let mut thermostat = match Thermostat::new(
-        options
-            .ha_api_address
-            .unwrap_or_else(|| "http://supervisor/core".to_string()),
+        options.ha_api_address.unwrap(),
+        options.ha_ws_address.unwrap(),
         options
             .ha_api_token
             .unwrap_or_else(|| match env::var("SUPERVISOR_TOKEN") {
@@ -198,6 +205,7 @@ pub struct Thermostat {
 impl Thermostat {
     pub async fn new(
         ha_address: String,
+        ha_ws_address: String,
         ha_api_token: String,
         ebusd_address: String,
         thermometer_entity: String,
@@ -205,7 +213,7 @@ impl Thermostat {
         mqtt_username: String,
         mqtt_password: String,
     ) -> Result<Self> {
-        let api = Api::new(ha_address, ha_api_token);
+        let api = Api::new(ha_address, ha_ws_address, ha_api_token);
         // check if thermometer entity exists
         let devices = api.get_devices().await?;
         let entities: Vec<String> = devices
@@ -254,9 +262,8 @@ impl Thermostat {
 
         let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
 
-        client
-            .subscribe("ebus-thermostat/#", QoS::AtLeastOnce)
-            .await?;
+        let c = client.clone();
+        tokio::spawn(async move { c.subscribe("ebus-thermostat/#", QoS::AtLeastOnce).await });
 
         Ok((client, eventloop))
     }
@@ -341,7 +348,10 @@ impl Thermostat {
                 }
                 m = mqtt_rx.recv() => {
                     if let Some((topic, msg)) = m {
-                        client.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await?;
+                        let c = client.clone();
+                        tokio::spawn(async move {
+                            c.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await
+                        });
                     }
                 }
                 // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins
@@ -502,6 +512,28 @@ impl Thermostat {
                                         self.prefs.set_point + self.prefs.temperature_band;
                                     self.publish_settings().await?;
                                 }
+                                "high" => {
+                                    if topic_parts.len() < 4 || topic_parts[3] != "set" {
+                                        return Ok(());
+                                    }
+
+                                    self.prefs.higher_bound = f32::from_str(&String::from_utf8(
+                                        publish.payload.to_vec(),
+                                    )?)?;
+                                    info!("New temp higher bound: {}", self.prefs.higher_bound);
+                                    self.publish_settings().await?;
+                                }
+                                "low" => {
+                                    if topic_parts.len() < 4 || topic_parts[3] != "set" {
+                                        return Ok(());
+                                    }
+
+                                    self.prefs.lower_bound = f32::from_str(&String::from_utf8(
+                                        publish.payload.to_vec(),
+                                    )?)?;
+                                    info!("New temp lower bound: {}", self.prefs.lower_bound);
+                                    self.publish_settings().await?;
+                                }
                                 _ => {}
                             }
                         }
@@ -547,6 +579,8 @@ impl Thermostat {
 pub struct Options {
     #[arg(long)]
     ha_api_address: Option<String>,
+    #[arg(long)]
+    ha_ws_address: Option<String>,
     #[arg(long)]
     ha_api_token: Option<String>,
     #[arg(long, default_value_t = String::new())]
