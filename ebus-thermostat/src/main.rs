@@ -3,7 +3,7 @@ mod homeassistant;
 
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Error, Result};
 use clap::Parser;
 use log::{debug, error, info, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
@@ -76,9 +76,19 @@ async fn main() {
     };
     thermostat.set_temp_preference(tp);
 
-    match thermostat.run().await {
-        Ok(_) => {}
-        Err(e) => error!("Unhandled exception: {:?}", e),
+    loop {
+        match thermostat.run().await {
+            Ok(_) => return,
+            Err(e) => match e {
+                ThermostatError::Restart => {
+                    continue;
+                }
+                ThermostatError::Other(msg) => {
+                    error!("Unhandled exception: {}", msg);
+                    return;
+                }
+            },
+        }
     }
 }
 
@@ -185,6 +195,16 @@ impl Default for HeaterSettings {
         }
     }
 }
+pub enum ThermostatError {
+    Restart,
+    Other(String),
+}
+
+impl From<Error> for ThermostatError {
+    fn from(value: Error) -> Self {
+        ThermostatError::Other(value.to_string())
+    }
+}
 
 pub struct Thermostat {
     ebusd: Ebusd,
@@ -268,8 +288,9 @@ impl Thermostat {
         Ok((client, eventloop))
     }
 
-    pub async fn run(&mut self) -> Result<()> {
-        let (mut client, mut mqtt_eventloop) = self.mqtt_reconnect().await?;
+    pub async fn run(&mut self) -> Result<(), ThermostatError> {
+        info!("Starting new run");
+        let (client, mut mqtt_eventloop) = self.mqtt_reconnect().await?;
 
         let mut temp_rx = self.temperature_changes().await?;
         let mut mqtt_rx = self.mqtt_rx.take().unwrap();
@@ -278,7 +299,6 @@ impl Thermostat {
         pin!(hold_timer);
         let mut hold = false;
         let mut update_pending = false;
-        let mut retries = 0;
 
         self.settings.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
         self.apply_settings().await?;
@@ -294,28 +314,11 @@ impl Thermostat {
                     match event {
                         Ok(ev) => {
                             self.handle_mqtt_message(ev).await?;
-                            retries = 0;
                         }
                         Err(e) => {
                             error!("MQTT error: {:?}", e);
-                            retries += 1;
-                            if retries > 5 {
-                                tokio::time::sleep(Duration::from_secs(60)).await;
-                                retries = 0;
-                            }
-                            debug!("MQTT reconnecting");
-                            (client, mqtt_eventloop) = loop {
-                                 break match self.mqtt_reconnect().await {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        error!("Failed reconnecting to MQTT: {}", e);
-                                        tokio::time::sleep(Duration::from_secs(30)).await;
-                                        continue;
-                                    }
-                                }
-                            };
-
-                            info!("MQTT reconnected");
+                            self.mqtt_rx = Some(mqtt_rx);
+                            return Err(ThermostatError::Restart);
                         }
                     }
                 }
@@ -324,7 +327,12 @@ impl Thermostat {
                         continue;
                     }
                     let temp = temp.unwrap();
-                    client.publish("ebus-thermostat/temp/current", QoS::AtLeastOnce, true, format!("{}", temp)).await?;
+                    let c = client.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = c.publish("ebus-thermostat/temp/current", QoS::AtLeastOnce, true, format!("{}", temp)).await {
+                            error!("Failed to publish current temp: {:?}", e);
+                        }
+                    });
                     debug!("Published MQTT update: {}", temp);
 
                     if temp == self.current_temperature {
@@ -350,7 +358,9 @@ impl Thermostat {
                     if let Some((topic, msg)) = m {
                         let c = client.clone();
                         tokio::spawn(async move {
-                            c.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await
+                            if let Err(e) = c.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await {
+                                error!("Failed to publish message to topic {}: {:?}", topic, e);
+                            }
                         });
                     }
                 }
