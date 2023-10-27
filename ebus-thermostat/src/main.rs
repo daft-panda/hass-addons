@@ -348,9 +348,16 @@ impl Thermostat {
                             continue;
                         } else {
                             debug!("Setting active mode");
-                            self.apply_settings().await?;
-                            hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
-                            hold = true;
+                            match self.apply_settings().await {
+                                Ok(()) => {
+                                    self.settings = mode_update;
+                                    hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
+                                    hold = true;
+                                }
+                                Err(e) => {
+                                    error!("Failed to apply settings: {:?}", e)
+                                }
+                            }
                         }
                     }
                 }
@@ -385,17 +392,18 @@ impl Thermostat {
     }
 
     fn update_heater_settings(&mut self, current_temp: f32) -> Option<HeaterSettings> {
-        if self.settings.flow_temp_desired == 0 {
+        let mut settings = self.settings.clone();
+        if settings.flow_temp_desired == 0 {
             // heater is currently inactive
             if current_temp <= self.prefs.lower_bound {
-                self.settings.flow_temp_desired = 60;
-                return Some(self.settings.clone());
+                settings.flow_temp_desired = 60;
+                return Some(settings);
             }
-        } else if self.settings.flow_temp_desired != 0 {
+        } else if settings.flow_temp_desired != 0 {
             // heater is active
             if current_temp >= self.prefs.higher_bound {
-                self.settings.flow_temp_desired = 0;
-                return Some(self.settings.clone());
+                settings.flow_temp_desired = 0;
+                return Some(settings);
             }
         }
 
