@@ -301,7 +301,7 @@ impl Thermostat {
         let mut update_pending = false;
 
         self.settings.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
-        self.apply_settings().await?;
+        self.apply_settings(self.settings.clone()).await?;
 
         loop {
             let mut repeat_timer = Duration::from_secs(5 * 60);
@@ -348,9 +348,8 @@ impl Thermostat {
                             continue;
                         } else {
                             debug!("Setting active mode");
-                            match self.apply_settings().await {
+                            match self.apply_settings(mode_update).await {
                                 Ok(()) => {
-                                    self.settings = mode_update;
                                     hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
                                     hold = true;
                                 }
@@ -374,14 +373,14 @@ impl Thermostat {
                 // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins
                 _ = sleep(repeat_timer) => {
                     debug!("Repeating mode");
-                    self.apply_settings().await?;
+                    self.apply_settings(self.settings.clone()).await?;
                 }
                 _ = &mut hold_timer => {
                     hold = false;
 
                     if update_pending {
                         debug!("Setting mode after hold timer");
-                        self.apply_settings().await?;
+                        self.apply_settings(self.settings.clone()).await?;
                         update_pending = false;
                     }
 
@@ -432,8 +431,8 @@ impl Thermostat {
         Ok(())
     }
 
-    async fn apply_settings(&mut self) -> Result<()> {
-        match self.ebusd.apply_settings(self.settings.clone()).await {
+    async fn apply_settings(&mut self, settings: HeaterSettings) -> Result<()> {
+        match self.ebusd.apply_settings(settings.clone()).await {
             Ok(_) => {
                 self.set_fails = 0;
             }
@@ -461,6 +460,7 @@ impl Thermostat {
             }
         }
         self.last_mode_set_time = Some(Instant::now());
+        self.settings = settings;
         self.publish_settings().await?;
         Ok(())
     }
@@ -572,7 +572,7 @@ impl Thermostat {
                                         self.update_heater_settings(self.current_temperature);
                                     }
 
-                                    self.apply_settings().await?;
+                                    self.apply_settings(self.settings.clone()).await?;
                                 }
                                 _ => {}
                             }
