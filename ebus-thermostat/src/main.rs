@@ -373,18 +373,29 @@ impl Thermostat {
                 // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins
                 _ = sleep(repeat_timer) => {
                     debug!("Repeating mode");
-                    self.apply_settings(self.settings.clone()).await?;
+                    match self.apply_settings(self.settings.clone()).await {
+                        Ok(_) => {},
+                        Err(e) => {
+                             error!("Failed to apply settings: {:?}", e);
+                        }
+                    }
                 }
                 _ = &mut hold_timer => {
                     hold = false;
 
                     if update_pending {
                         debug!("Setting mode after hold timer");
-                        self.apply_settings(self.settings.clone()).await?;
-                        update_pending = false;
+                        match self.apply_settings(self.settings.clone()).await {
+                            Ok(_) => {
+                                hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
+                                update_pending = false;
+                            },
+                            Err(e) => {
+                                error!("Failed to apply settings: {:?}", e);
+                                hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(10000));
+                            }
+                        }
                     }
-
-                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
                 }
             }
         }
