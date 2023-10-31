@@ -81,6 +81,7 @@ async fn main() {
             Ok(_) => return,
             Err(e) => match e {
                 ThermostatError::Restart => {
+                    info!("Restarting thermostat");
                     continue;
                 }
                 ThermostatError::Other(msg) => {
@@ -324,6 +325,7 @@ impl Thermostat {
                 }
                 temp = temp_rx.recv() => {
                     if temp.is_none() {
+                        debug!("Received empty temp update");
                         continue;
                     }
                     let temp = temp.unwrap();
@@ -382,6 +384,7 @@ impl Thermostat {
                 }
                 _ = &mut hold_timer => {
                     hold = false;
+                    debug!("Hold timer elapsed");
 
                     if update_pending {
                         debug!("Setting mode after hold timer");
