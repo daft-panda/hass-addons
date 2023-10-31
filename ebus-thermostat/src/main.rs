@@ -390,7 +390,6 @@ impl Thermostat {
                         debug!("Setting mode after hold timer");
                         match self.apply_settings(self.settings.clone()).await {
                             Ok(_) => {
-                                hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
                                 update_pending = false;
                             },
                             Err(e) => {
@@ -399,6 +398,8 @@ impl Thermostat {
                             }
                         }
                     }
+
+                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
                 }
             }
         }
