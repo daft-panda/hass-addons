@@ -10,12 +10,12 @@ rumqttc = { version = "0.23.0", features = ["use-rustls"] }
 tokio = { version = "1.33.0", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 tokio-tungstenite = { version = "*", features = ["rustls-tls-native-roots"] }
 reqwest = { version = "0.11.22", default-features=false, features = ["rustls-tls"] }
-serde = { version = "1.0.189", features = ["derive"] }
-serde_json = { version = "1.0.107" }
+serde = { version = "1.0.190", features = ["derive"] }
+serde_json = { version = "1.0.108" }
 anyhow = "1.0.75"
-futures-util = "0.3.28"
+futures-util = "0.3.29"
 time = { version = "0.3.30", features = ["serde-well-known"] }
 env_logger = "0.10.0"
 log = "0.4.20"
-clap = { version = "4.4.6", features = ["derive"] }
+clap = { version = "4.4.7", features = ["derive"] }
 console-subscriber = "0.2.0"

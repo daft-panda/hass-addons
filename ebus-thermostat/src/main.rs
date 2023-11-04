@@ -39,44 +39,46 @@ async fn main() {
 
     debug!("Read options: {:?}", options);
 
-    let mut thermostat = match Thermostat::new(
-        options.ha_api_address.unwrap(),
-        options.ha_ws_address.unwrap(),
-        options
-            .ha_api_token
-            .unwrap_or_else(|| match env::var("SUPERVISOR_TOKEN") {
-                Ok(v) => v,
-                Err(_) => {
-                    error!("SUPERVISOR_TOKEN env var is not set\n Available env vars:");
-                    for (key, value) in env::vars() {
-                        error!("{key}: {value}");
-                    }
-                    panic!("Exiting");
-                }
-            }),
-        options.ebusd_address,
-        options.thermometer_entity,
-        options.mqtt_host,
-        options.mqtt_username,
-        options.mqtt_password,
-    )
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            error!("Failed to initialise thermostat: {:?}", e);
-            return;
-        }
-    };
-
     let tp = TemperaturePreferences {
         tap_water_set_point: options.tap_water_temp as f32,
         temperature_band: options.temperature_band,
         ..Default::default()
     };
-    thermostat.set_temp_preference(tp);
 
     loop {
+        let mut thermostat = match Thermostat::new(
+            options.ha_api_address.clone().unwrap(),
+            options.ha_ws_address.clone().unwrap(),
+            options
+                .ha_api_token
+                .clone()
+                .unwrap_or_else(|| match env::var("SUPERVISOR_TOKEN") {
+                    Ok(v) => v,
+                    Err(_) => {
+                        error!("SUPERVISOR_TOKEN env var is not set\n Available env vars:");
+                        for (key, value) in env::vars() {
+                            error!("{key}: {value}");
+                        }
+                        panic!("Exiting");
+                    }
+                }),
+            options.ebusd_address.clone(),
+            options.thermometer_entity.clone(),
+            options.mqtt_host.clone(),
+            options.mqtt_username.clone(),
+            options.mqtt_password.clone(),
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                error!("Failed to initialise thermostat: {:?}", e);
+                return;
+            }
+        };
+
+        thermostat.set_temp_preference(tp);
+
         match thermostat.run().await {
             Ok(_) => return,
             Err(e) => match e {
@@ -93,7 +95,7 @@ async fn main() {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Copy)]
 pub struct TemperaturePreferences {
     temperature_band: f32,
     lower_bound: f32,
@@ -300,6 +302,7 @@ impl Thermostat {
         pin!(hold_timer);
         let mut hold = false;
         let mut update_pending = false;
+        let mut temp_recv_err = 0;
 
         self.settings.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
         self.apply_settings(self.settings.clone()).await?;
@@ -326,6 +329,10 @@ impl Thermostat {
                 temp = temp_rx.recv() => {
                     if temp.is_none() {
                         debug!("Received empty temp update");
+                        temp_recv_err += 1;
+                        if temp_recv_err > 5 {
+                            return Err(ThermostatError::Restart);
+                        }
                         continue;
                     }
                     let temp = temp.unwrap();
