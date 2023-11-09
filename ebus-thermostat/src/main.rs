@@ -118,7 +118,7 @@ impl Default for TemperaturePreferences {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialOrd, PartialEq)]
 pub enum HeaterMode {
     AUTO,
     HEAT,
