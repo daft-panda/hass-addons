@@ -130,7 +130,7 @@ impl HeaterMode {
         match self {
             HeaterMode::AUTO => String::from("0"),
             HeaterMode::HEAT => String::from("0"),
-            HeaterMode::OFF => String::from("off"),
+            HeaterMode::OFF => String::from("0"),
         }
     }
 }
@@ -415,6 +415,10 @@ impl Thermostat {
     fn update_heater_settings(&mut self, current_temp: f32) -> Option<HeaterSettings> {
         let mut settings = self.settings.clone();
         if settings.flow_temp_desired == 0 {
+            if settings.hc_mode == HeaterMode::OFF {
+                return None;
+            }
+
             // heater is currently inactive
             if current_temp <= self.prefs.lower_bound {
                 settings.flow_temp_desired = 60;
@@ -594,7 +598,12 @@ impl Thermostat {
                                         self.update_heater_settings(self.current_temperature);
                                     }
 
-                                    self.apply_settings(self.settings.clone()).await?;
+                                    match self.apply_settings(self.settings.clone()).await {
+                                        Ok(_) => {},
+                                        Err(e) => {
+                                            error!("Failed to apply settings: {:?}", e);
+                                        }
+                                    }
                                 }
                                 _ => {}
                             }
