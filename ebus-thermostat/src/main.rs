@@ -342,13 +342,9 @@ impl Thermostat {
                             error!("Failed to publish current temp: {:?}", e);
                         }
                     });
-                    debug!("Published MQTT update: {}", temp);
 
-                    if temp == self.current_temperature {
-                        continue;
-                    } else {
-                        self.current_temperature = temp;
-                    }
+                    debug!("Published MQTT update: {}", temp);
+                    self.current_temperature = temp;
 
                     if let Some(mode_update) = self.update_heater_settings(temp) {
                         debug!("Active mode update: {:?}", mode_update);
@@ -599,7 +595,7 @@ impl Thermostat {
                                     }
 
                                     match self.apply_settings(self.settings.clone()).await {
-                                        Ok(_) => {},
+                                        Ok(_) => {}
                                         Err(e) => {
                                             error!("Failed to apply settings: {:?}", e);
                                         }
