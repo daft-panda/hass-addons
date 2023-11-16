@@ -590,8 +590,8 @@ impl Thermostat {
                                     .map_err(|_| anyhow!("Invalid heater mode"))?;
                                     info!("New heater mode: {}", self.settings.hc_mode.to_string());
 
-                                    if self.current_temperature != 0.0 {
-                                        self.update_heater_settings(self.current_temperature);
+                                    if self.settings.hc_mode == HeaterMode::OFF {
+                                        self.settings.flow_temp_desired = 0;
                                     }
 
                                     match self.apply_settings(self.settings.clone()).await {
