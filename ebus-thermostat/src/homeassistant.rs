@@ -108,10 +108,7 @@ impl Api {
     }
 
     pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
-        let url = Url::parse(&format!(
-            "{}/websocket",
-            self.ws_url.clone().replace("http", "ws")
-        ))?;
+        let url = format!("{}/websocket", self.ws_url.clone().replace("http", "ws"));
         let (ws, _) = connect_async(url).await?;
         let (mut write, mut read) = ws.split();
         // await auth required message
@@ -133,7 +130,8 @@ impl Api {
   "access_token": "blurg"
 }
         "#
-                .replace("blurg", &self.bearer_token),
+                .replace("blurg", &self.bearer_token)
+                .into(),
             ))
             .await?;
 
@@ -156,7 +154,8 @@ impl Api {
   "event_type": "state_changed"
 }
         "#
-                .to_string(),
+                .to_string()
+                .into(),
             ))
             .await?;
 
