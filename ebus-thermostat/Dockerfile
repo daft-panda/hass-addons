@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
-#ARG BUILD_FROM
-#FROM $BUILD_FROM
-FROM alpine
+ARG BUILD_FROM
+FROM $BUILD_FROM
 
 COPY ./ ./
 
