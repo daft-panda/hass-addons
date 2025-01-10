@@ -46,10 +46,10 @@ impl Ebusd {
         let result = String::from_utf8(Vec::from(&buffer[..bytes_read]))?;
         let result = result.trim();
         debug!("Set mode result: {}", result);
-        if result.trim() == arg {
-            Ok(())
-        } else {
+        if result.contains("error") {
             bail!("Set mode {} failed: {}", arg, result);
+        } else {
+            Ok(())
         }
     }
 
