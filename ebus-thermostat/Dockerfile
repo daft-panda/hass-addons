@@ -1,11 +1,13 @@
 # syntax=docker/dockerfile:1
-ARG BUILD_FROM
-FROM $BUILD_FROM
+#ARG BUILD_FROM
+#FROM $BUILD_FROM
+FROM alpine
 
 COPY ./ ./
 
 RUN set -e && \
     apk add --no-cache cargo && \
+    cargo install --force --locked bindgen-cli && \
     cargo build --locked --release
 
 RUN chmod a+x ./run.sh

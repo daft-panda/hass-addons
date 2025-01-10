@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rustls = "0.23.5"
+rustls = { version = "0.23.5", features = ["logging", "std", "ring"], default-features = false }
 rumqttc = { version = "0.24.0", features = ["use-rustls"] }
 tokio = { version = "1.34.0", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 tokio-tungstenite = { version = "*", features = ["rustls-tls-native-roots"] }
