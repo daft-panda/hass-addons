@@ -1,8 +1,8 @@
 # https://developers.home-assistant.io/docs/add-ons/configuration#add-on-dockerfile
 build_from:
-  aarch64: "ghcr.io/home-assistant/aarch64-base:3.18"
-  amd64: "ghcr.io/home-assistant/amd64-base:3.18"
-  i386: "ghcr.io/home-assistant/i386-base:3.18"
+  aarch64: "ghcr.io/home-assistant/aarch64-base:3.21"
+  amd64: "ghcr.io/home-assistant/amd64-base:3.21"
+  i386: "ghcr.io/home-assistant/i386-base:3.21"
 labels:
   org.opencontainers.image.title: "ebus thermostat"
   org.opencontainers.image.description: "Control your ebus heater connected via ebusd"

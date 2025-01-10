@@ -6,7 +6,6 @@ COPY ./ ./
 
 RUN set -e && \
     apk add --no-cache cargo && \
-    cargo install --force --locked bindgen-cli && \
     cargo build --locked --release
 
 RUN chmod a+x ./run.sh
