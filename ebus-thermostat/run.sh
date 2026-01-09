@@ -1,3 +1,3 @@
 #!/usr/bin/with-contenv bashio
 
-./target/release/ebus-thermostat
+/usr/local/bin/ebus-thermostat
