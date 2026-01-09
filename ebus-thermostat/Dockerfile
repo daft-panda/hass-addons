@@ -5,7 +5,7 @@ ARG BUILD_FROM
 # Build stage - compile Rust binary using the same base image
 FROM $BUILD_FROM AS builder
 
-RUN apk add --no-cache cargo
+RUN apk add --no-cache cargo cmake make g++ perl
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
