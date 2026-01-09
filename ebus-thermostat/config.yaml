@@ -1,5 +1,5 @@
 name: "ebusd thermostat"
-version: "0.1.2"
+version: "0.2.0"
 slug: ebusd_thermostat
 description: "Control your ebus heater connected via ebusd"
 init: false
@@ -11,20 +11,19 @@ map:
   - config:rw
   - ssl
 homeassistant_api: true
+services:
+  - mqtt:need
 options:
   ha_api_address: "http://supervisor/core"
   ebusd_address: null
   thermometer_entity: null
   tap_water_temp: 50
   temperature_band: 0.5
-  mqtt_host: "localhost"
-  mqtt_username: "mqtt"
-  mqtt_password: "mqtt"
 
 schema:
   ha_api_address: "str?"
   ha_api_token: "str?"
-  ebusd_address: str
+  ebusd_address: "str?"
   thermometer_entity: str
   tap_water_temp: "int(0,80)"
   temperature_band: "float(0,10)"

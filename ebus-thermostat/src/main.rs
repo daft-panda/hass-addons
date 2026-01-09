@@ -9,9 +9,8 @@ use log::{debug, error, info, LevelFilter};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
 use std::str::FromStr;
-use std::{env, fs};
+use std::env;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{sleep, Duration, Instant};
 use tokio::{io, pin, select};
@@ -22,12 +21,7 @@ async fn main() {
         .filter(None, LevelFilter::Debug)
         .init();
 
-    let options_file = Path::new("/data/options.json");
-    let mut options: Options = if options_file.exists() {
-        serde_json::from_slice(fs::read(options_file).unwrap().as_slice()).unwrap()
-    } else {
-        Options::parse()
-    };
+    let mut options = Options::parse();
 
     if options.ha_api_address.is_none() {
         options.ha_api_address = Some("http://supervisor/core".to_string());
