@@ -1,12 +1,11 @@
 # syntax=docker/dockerfile:1
 
-# Global ARG must be declared before first FROM to be available in later stages
 ARG BUILD_FROM
 
-# Build stage - compile Rust binary
-FROM rust:alpine AS builder
+# Build stage - compile Rust binary using the same base image
+FROM $BUILD_FROM AS builder
 
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache cargo
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
