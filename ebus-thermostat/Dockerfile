@@ -1,5 +1,8 @@
 # syntax=docker/dockerfile:1
 
+# Global ARG must be declared before first FROM to be available in later stages
+ARG BUILD_FROM
+
 # Build stage - compile Rust binary
 FROM rust:alpine AS builder
 
@@ -12,7 +15,6 @@ COPY src ./src
 RUN cargo build --locked --release
 
 # Runtime stage - minimal image with only the binary
-ARG BUILD_FROM
 FROM $BUILD_FROM
 
 COPY --from=builder /build/target/release/ebus-thermostat /usr/local/bin/
