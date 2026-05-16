@@ -3,6 +3,9 @@ use anyhow::bail;
 use log::debug;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::{Duration, timeout};
+
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Ebusd {
     endpoint: String,
@@ -24,7 +27,13 @@ impl Ebusd {
             .await?;
 
         let mut buffer = [0; 1024];
-        let bytes_read = self.connection.read(&mut buffer).await?;
+        let bytes_read = match timeout(READ_TIMEOUT, self.connection.read(&mut buffer)).await {
+            Ok(r) => r?,
+            Err(_) => bail!(
+                "ebusd define_message read timed out after {:?}",
+                READ_TIMEOUT
+            ),
+        };
         let result = String::from_utf8(Vec::from(&buffer[..bytes_read]))?;
         let result = result.trim();
         debug!("Define message: {}", result);
@@ -42,7 +51,13 @@ impl Ebusd {
         self.connection.write_all(cmd.as_bytes()).await?;
 
         let mut buffer = [0; 1024];
-        let bytes_read = self.connection.read(&mut buffer).await?;
+        let bytes_read = match timeout(READ_TIMEOUT, self.connection.read(&mut buffer)).await {
+            Ok(r) => r?,
+            Err(_) => bail!(
+                "ebusd apply_settings read timed out after {:?}",
+                READ_TIMEOUT
+            ),
+        };
         let result = String::from_utf8(Vec::from(&buffer[..bytes_read]))?;
         let result = result.trim();
         debug!("Set mode result: {}", result);

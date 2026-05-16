@@ -3,16 +3,16 @@ mod homeassistant;
 
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
-use anyhow::{anyhow, bail, Error, Result};
+use anyhow::{Error, Result, anyhow, bail};
 use clap::Parser;
-use log::{debug, error, info, LevelFilter};
+use log::{LevelFilter, debug, error, info};
 use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::str::FromStr;
 use std::env;
-use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::time::{sleep, Duration, Instant};
+use std::str::FromStr;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::time::{Duration, Instant, sleep};
 use tokio::{io, pin, select};
 
 #[tokio::main]
