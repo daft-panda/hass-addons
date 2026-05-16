@@ -5,7 +5,16 @@ ARG BUILD_FROM
 # Build stage - compile Rust binary using the same base image
 FROM $BUILD_FROM AS builder
 
-RUN apk add --no-cache cargo cmake make g++ perl
+# Install current stable Rust via rustup rather than Alpine's cargo package,
+# since the apk toolchain lags behind crate MSRV requirements.
+RUN apk add --no-cache curl ca-certificates cmake make g++ gcc musl-dev perl
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path \
+    && rustc --version
 
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
