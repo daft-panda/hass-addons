@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/base:3.24
 
 # Build stage - compile Rust binary using the same base image
 FROM $BUILD_FROM AS builder
@@ -29,6 +29,12 @@ COPY --from=builder /build/target/release/ebus-thermostat /usr/local/bin/
 COPY run.sh /
 
 RUN chmod a+x /run.sh
+
+LABEL \
+    org.opencontainers.image.title="ebus thermostat" \
+    org.opencontainers.image.description="Control your ebus heater connected via ebusd" \
+    org.opencontainers.image.source="https://github.com/daft-panda/hass-addons" \
+    org.opencontainers.image.licenses="Apache License 2.0"
 
 # Running from a script instead executing the binary directly is needed as env vars do not get injected otherwise
 CMD [ "/run.sh" ]
