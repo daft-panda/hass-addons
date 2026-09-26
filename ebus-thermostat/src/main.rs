@@ -3,89 +3,73 @@ mod homeassistant;
 
 use crate::ebusd::Ebusd;
 use crate::homeassistant::Api;
-use anyhow::{Error, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
-use log::{LevelFilter, debug, error, info};
-use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, QoS};
+use log::{LevelFilter, debug, error, info, warn};
+use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, Publish, QoS};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::env;
+use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use tokio::sync::mpsc::{Receiver, Sender, channel};
-use tokio::time::{Duration, Instant, sleep};
-use tokio::{io, pin, select};
+use tokio::select;
+use tokio::time::{Duration, Instant, sleep, sleep_until, timeout_at};
+
+const TOPIC_PREFIX: &str = "ebus-thermostat/";
+/// SetMode needs to be sent at least once every 10 mins as a keepalive, we use 5 mins
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+/// How soon to retry when the heater could not be reached
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+/// How long to wait for the MQTT subscription to be acknowledged on startup
+const SUBSCRIBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long to collect retained MQTT messages after subscribing, before taking control
+const RETAINED_WINDOW: Duration = Duration::from_secs(2);
+const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+const STATE_TOPICS: [&str; 4] = ["temp", "temp/low", "temp/high", "mode"];
+// temp/set derives low/high, so it has to be applied before those
+const COMMAND_TOPICS: [&str; 4] = ["temp/set", "temp/low/set", "temp/high/set", "mode/set"];
 
 #[tokio::main]
 async fn main() {
     env_logger::builder()
-        .filter(None, LevelFilter::Debug)
+        .filter(None, LevelFilter::Info)
+        .filter(Some("ebus_thermostat"), LevelFilter::Debug)
         .init();
 
-    let mut options = Options::parse();
+    let options = Options::parse();
 
-    if options.ha_api_address.is_none() {
-        options.ha_api_address = Some("http://supervisor/core".to_string());
-    }
-
-    if options.ha_ws_address.is_none() {
-        options.ha_ws_address = options.ha_api_address.clone();
-    }
-
-    debug!("Read options: {:?}", options);
-
-    let tp = TemperaturePreferences {
-        tap_water_set_point: options.tap_water_temp as f32,
-        temperature_band: options.temperature_band,
-        ..Default::default()
+    let token = match options
+        .ha_api_token
+        .clone()
+        .or_else(|| env::var("SUPERVISOR_TOKEN").ok())
+    {
+        Some(v) => v,
+        None => {
+            error!("No HA API token configured and the SUPERVISOR_TOKEN env var is not set");
+            std::process::exit(1);
+        }
     };
 
+    // Never exit: HA restarts, broker restarts and ebusd hiccups are all transient, and the
+    // supervisor watchdog does not restart an add-on that exits cleanly.
+    // The thermostat outlives its connections, so a reconnect doesn't reset the heater state.
+    let mut thermostat = Thermostat::new(&options, token);
+    let mut backoff = Duration::from_secs(1);
     loop {
-        let mut thermostat = match Thermostat::new(
-            options.ha_api_address.clone().unwrap(),
-            options.ha_ws_address.clone().unwrap(),
-            options
-                .ha_api_token
-                .clone()
-                .unwrap_or_else(|| match env::var("SUPERVISOR_TOKEN") {
-                    Ok(v) => v,
-                    Err(_) => {
-                        error!("SUPERVISOR_TOKEN env var is not set\n Available env vars:");
-                        for (key, value) in env::vars() {
-                            error!("{key}: {value}");
-                        }
-                        panic!("Exiting");
-                    }
-                }),
-            options.ebusd_address.clone(),
-            options.thermometer_entity.clone(),
-            options.mqtt_host.clone(),
-            options.mqtt_username.clone(),
-            options.mqtt_password.clone(),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                error!("Failed to initialise thermostat: {:?}", e);
-                return;
-            }
-        };
-
-        thermostat.set_temp_preference(tp);
-
-        match thermostat.run().await {
-            Ok(_) => return,
-            Err(e) => match e {
-                ThermostatError::Restart => {
-                    info!("Restarting thermostat");
-                    continue;
-                }
-                ThermostatError::Other(msg) => {
-                    error!("Unhandled exception: {}", msg);
-                    return;
-                }
-            },
+        let started = Instant::now();
+        if let Err(e) = thermostat.run().await {
+            error!("Thermostat stopped: {:#}", e);
         }
+
+        if started.elapsed() > KEEPALIVE_INTERVAL {
+            backoff = Duration::from_secs(1);
+        }
+        info!("Restarting thermostat in {:?}", backoff);
+        sleep(backoff).await;
+        backoff = (backoff * 2).min(MAX_BACKOFF);
     }
 }
 
@@ -96,23 +80,18 @@ pub struct TemperaturePreferences {
     higher_bound: f32,
     set_point: f32,
     maintain_state_for: Duration,
-    tap_water_set_point: f32,
 }
 
-impl Default for TemperaturePreferences {
-    fn default() -> Self {
-        TemperaturePreferences {
-            temperature_band: 1.0,
-            lower_bound: 19.0,
-            higher_bound: 23.0,
-            set_point: 22.0,
-            maintain_state_for: Duration::from_secs(60),
-            tap_water_set_point: 45.0,
-        }
+impl TemperaturePreferences {
+    fn set_set_point(&mut self, set_point: f32) {
+        self.set_point = set_point;
+        self.lower_bound = set_point - self.temperature_band;
+        self.higher_bound = set_point + self.temperature_band;
     }
 }
 
-#[derive(Clone, Debug, PartialOrd, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum HeaterMode {
     AUTO,
     HEAT,
@@ -129,25 +108,25 @@ impl HeaterMode {
     }
 }
 
-impl ToString for HeaterMode {
-    fn to_string(&self) -> String {
-        match self {
-            HeaterMode::AUTO => String::from("auto"),
-            HeaterMode::HEAT => String::from("heat"),
-            HeaterMode::OFF => String::from("off"),
-        }
+impl fmt::Display for HeaterMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            HeaterMode::AUTO => "auto",
+            HeaterMode::HEAT => "heat",
+            HeaterMode::OFF => "off",
+        })
     }
 }
 
 impl FromStr for HeaterMode {
-    type Err = ();
+    type Err = anyhow::Error;
 
-    fn from_str(s: &str) -> Result<Self, ()> {
+    fn from_str(s: &str) -> Result<Self> {
         match s {
             "auto" => Ok(HeaterMode::AUTO),
             "heat" => Ok(HeaterMode::HEAT),
             "off" => Ok(HeaterMode::OFF),
-            _ => Err(()),
+            _ => bail!("invalid heater mode"),
         }
     }
 }
@@ -163,7 +142,7 @@ pub struct HeaterSettings {
 }
 
 impl HeaterSettings {
-    pub fn into_cmd_arg(self) -> String {
+    pub fn to_cmd_arg(&self) -> String {
         format!(
             "{};{};{};{};-;{};0;{};-;0;0;0",
             self.hc_mode.to_command_value(),
@@ -192,432 +171,421 @@ impl Default for HeaterSettings {
         }
     }
 }
-pub enum ThermostatError {
-    Restart,
-    Other(String),
-}
 
-impl From<Error> for ThermostatError {
-    fn from(value: Error) -> Self {
-        ThermostatError::Other(value.to_string())
-    }
+/// Climate settings that survive add-on restarts.
+#[derive(Serialize, Deserialize, Debug)]
+struct PersistedState {
+    mode: HeaterMode,
+    set_point: f32,
+    lower_bound: f32,
+    higher_bound: f32,
+    /// Last payload handled per command topic, so retained commands that were already applied
+    /// are not replayed on startup.
+    #[serde(default)]
+    last_commands: HashMap<String, String>,
 }
 
 pub struct Thermostat {
     ebusd: Ebusd,
     ha_api: Api,
+    mqtt: Option<AsyncClient>,
     mqtt_host: String,
     mqtt_username: String,
     mqtt_password: String,
     thermometer_entity: String,
+    state_file: PathBuf,
+    loaded_from_file: bool,
+    last_commands: HashMap<String, String>,
     prefs: TemperaturePreferences,
     settings: HeaterSettings,
-    current_temperature: f32,
-    last_mode_set_time: Option<Instant>,
-    mqtt_tx: Sender<(String, String)>,
-    mqtt_rx: Option<Receiver<(String, String)>>,
-    set_fails: u8,
+    current_temperature: Option<f32>,
+    /// Flow temp last successfully sent to the heater, and when it changed
+    applied_flow_temp: Option<u8>,
+    last_flow_change: Option<Instant>,
+    next_apply: Instant,
 }
 
 impl Thermostat {
-    pub async fn new(
-        ha_address: String,
-        ha_ws_address: String,
-        ha_api_token: String,
-        ebusd_address: String,
-        thermometer_entity: String,
-        mqtt_host: String,
-        mqtt_username: String,
-        mqtt_password: String,
-    ) -> Result<Self> {
-        let api = Api::new(ha_address, ha_ws_address, ha_api_token);
-        // check if thermometer entity exists
-        let devices = api.get_devices().await?;
-        let entities: Vec<String> = devices
-            .into_iter()
-            .flat_map(|d| d.entities)
-            .flatten()
-            .collect();
-        let mut found = false;
-        for entity in entities {
-            if entity == thermometer_entity {
-                found = true;
-                break;
-            }
+    pub fn new(options: &Options, ha_api_token: String) -> Self {
+        let mut prefs = TemperaturePreferences {
+            temperature_band: options.temperature_band,
+            lower_bound: 0.0,
+            higher_bound: 0.0,
+            set_point: 0.0,
+            maintain_state_for: Duration::from_secs(60),
+        };
+        prefs.set_set_point(22.0);
+
+        let mut settings = HeaterSettings {
+            hwc_temp_desired: options.tap_water_temp,
+            ..Default::default()
+        };
+
+        let state_file = options.state_file.clone();
+        let mut last_commands = HashMap::new();
+        let persisted = load_state(&state_file);
+        let loaded_from_file = persisted.is_some();
+        if let Some(s) = persisted {
+            info!("Restored settings from {}: {:?}", state_file.display(), s);
+            settings.hc_mode = s.mode;
+            prefs.set_point = s.set_point;
+            prefs.lower_bound = s.lower_bound;
+            prefs.higher_bound = s.higher_bound;
+            last_commands = s.last_commands;
         }
 
-        if !found {
-            bail!("Thermometer entity {} not found", thermometer_entity);
+        Self {
+            ebusd: Ebusd::new(options.ebusd_address.clone()),
+            ha_api: Api::new(
+                options.ha_api_address.clone(),
+                options
+                    .ha_ws_address
+                    .clone()
+                    .unwrap_or_else(|| options.ha_api_address.clone()),
+                ha_api_token,
+            ),
+            mqtt: None,
+            mqtt_host: options.mqtt_host.clone(),
+            mqtt_username: options.mqtt_username.clone(),
+            mqtt_password: options.mqtt_password.clone(),
+            thermometer_entity: options.thermometer_entity.clone(),
+            state_file,
+            loaded_from_file,
+            last_commands,
+            prefs,
+            settings,
+            current_temperature: None,
+            applied_flow_temp: None,
+            last_flow_change: None,
+            next_apply: Instant::now(),
         }
-
-        let mut ebusd = Ebusd::new(ebusd_address).await?;
-        ebusd.define_message( "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
-
-        let (tx, rx) = channel(50);
-
-        Ok(Self {
-            ebusd,
-            ha_api: api,
-            thermometer_entity,
-            mqtt_host,
-            mqtt_username,
-            mqtt_password,
-            prefs: TemperaturePreferences::default(),
-            settings: HeaterSettings::default(),
-            last_mode_set_time: None,
-            current_temperature: 0.0,
-            mqtt_tx: tx,
-            mqtt_rx: Some(rx),
-            set_fails: 0,
-        })
     }
 
-    async fn mqtt_reconnect(&self) -> Result<(AsyncClient, EventLoop)> {
-        let mut mqttoptions = MqttOptions::new("ebus-thermostat", self.mqtt_host.clone(), 1883);
-        mqttoptions.set_keep_alive(Duration::from_secs(30));
-        mqttoptions.set_credentials(self.mqtt_username.clone(), self.mqtt_password.clone());
-
-        let (client, eventloop) = AsyncClient::new(mqttoptions, 10);
-
-        let c = client.clone();
-        tokio::spawn(async move { c.subscribe("ebus-thermostat/#", QoS::AtLeastOnce).await });
-
-        Ok((client, eventloop))
-    }
-
-    pub async fn run(&mut self) -> Result<(), ThermostatError> {
+    pub async fn run(&mut self) -> Result<()> {
         info!("Starting new run");
-        let (client, mut mqtt_eventloop) = self.mqtt_reconnect().await?;
 
-        let mut temp_rx = self.temperature_changes().await?;
-        let mut mqtt_rx = self.mqtt_rx.take().unwrap();
+        let initial = self
+            .ha_api
+            .get_state(&self.thermometer_entity)
+            .await
+            .context("fetching thermometer state from HA")?
+            .ok_or_else(|| anyhow!("Thermometer entity {} not found", self.thermometer_entity))?;
+        let mut temp_rx = self
+            .ha_api
+            .state_updates(self.thermometer_entity.clone())
+            .await
+            .context("subscribing to HA state updates")?;
 
-        let hold_timer = sleep(self.prefs.maintain_state_for);
-        pin!(hold_timer);
-        let mut hold = false;
-        let mut update_pending = false;
-        let mut temp_recv_err = 0;
+        let mut mqtt_options = MqttOptions::new("ebus-thermostat", self.mqtt_host.clone(), 1883);
+        mqtt_options.set_keep_alive(Duration::from_secs(60));
+        mqtt_options.set_credentials(self.mqtt_username.clone(), self.mqtt_password.clone());
+        let (client, mut eventloop) = AsyncClient::new(mqtt_options, 100);
+        client
+            .try_subscribe(format!("{}#", TOPIC_PREFIX), QoS::AtLeastOnce)
+            .context("subscribing to MQTT topics")?;
+        self.mqtt = Some(client);
 
-        self.settings.hwc_temp_desired = self.prefs.tap_water_set_point as u8;
-        self.apply_settings(self.settings.clone()).await?;
+        // Pick up the current climate settings before touching the heater
+        self.initial_sync(&mut eventloop).await?;
+        self.publish_settings();
+        self.handle_temperature(&initial.state);
+        self.next_apply = Instant::now();
 
         loop {
-            let mut repeat_timer = Duration::from_secs(5 * 60);
-            if let Some(last_set) = self.last_mode_set_time {
-                repeat_timer = repeat_timer.saturating_sub(Instant::now().duration_since(last_set));
-            }
-
             select! {
-                event = mqtt_eventloop.poll() => {
-                    match event {
-                        Ok(ev) => {
-                            self.handle_mqtt_message(ev).await?;
-                        }
-                        Err(e) => {
-                            error!("MQTT error: {:?}", e);
-                            self.mqtt_rx = Some(mqtt_rx);
-                            return Err(ThermostatError::Restart);
-                        }
-                    }
+                event = eventloop.poll() => {
+                    self.handle_mqtt_event(event.context("MQTT connection failed")?)?;
                 }
-                temp = temp_rx.recv() => {
-                    if temp.is_none() {
-                        debug!("Received empty temp update");
-                        temp_recv_err += 1;
-                        if temp_recv_err > 5 {
-                            return Err(ThermostatError::Restart);
-                        }
-                        continue;
-                    }
-                    let temp = temp.unwrap();
-                    let c = client.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = c.publish("ebus-thermostat/temp/current", QoS::AtLeastOnce, true, format!("{}", temp)).await {
-                            error!("Failed to publish current temp: {:?}", e);
-                        }
-                    });
-
-                    debug!("Published MQTT update: {}", temp);
-                    self.current_temperature = temp;
-
-                    if let Some(mode_update) = self.update_heater_settings(temp) {
-                        debug!("Active mode update: {:?}", mode_update);
-                        if hold {
-                            update_pending = true;
-                            continue;
-                        } else {
-                            debug!("Setting active mode");
-                            match self.apply_settings(mode_update).await {
-                                Ok(()) => {
-                                    hold_timer.as_mut().reset(Instant::now() + self.prefs.maintain_state_for);
-                                    hold = true;
-                                }
-                                Err(e) => {
-                                    error!("Failed to apply settings: {:?}", e)
-                                }
-                            }
-                        }
-                    }
+                state = temp_rx.recv() => {
+                    let state = state.ok_or_else(|| anyhow!("Lost HA state updates"))?;
+                    self.handle_temperature(&state.state);
                 }
-                m = mqtt_rx.recv() => {
-                    if let Some((topic, msg)) = m {
-                        let c = client.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = c.publish(format!("ebus-thermostat/{}", topic), QoS::AtLeastOnce, true, msg).await {
-                                error!("Failed to publish message to topic {}: {:?}", topic, e);
-                            }
-                        });
-                    }
-                }
-                // SetMode needs to be called at least once every 10 mins as a keepalive, we use 5 mins
-                _ = sleep(repeat_timer) => {
-                    debug!("Repeating mode");
-                    match self.apply_settings(self.settings.clone()).await {
-                        Ok(_) => {},
-                        Err(e) => {
-                             error!("Failed to apply settings: {:?}", e);
-                        }
-                    }
-                }
-                _ = &mut hold_timer => {
-                    hold = false;
-                    debug!("Hold timer elapsed");
-
-                    if update_pending {
-                        debug!("Setting mode after hold timer");
-                        match self.apply_settings(self.settings.clone()).await {
-                            Ok(_) => {
-                                update_pending = false;
-                            },
-                            Err(e) => {
-                                error!("Failed to apply settings: {:?}", e);
-                                hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(10000));
-                            }
-                        }
-                    }
-
-                    hold_timer.as_mut().reset(Instant::now() + Duration::from_secs(999999999));
+                _ = sleep_until(self.next_apply) => {
+                    self.apply_settings().await;
                 }
             }
         }
     }
 
-    fn update_heater_settings(&mut self, current_temp: f32) -> Option<HeaterSettings> {
-        let mut settings = self.settings.clone();
-        if settings.flow_temp_desired == 0 {
-            if settings.hc_mode == HeaterMode::OFF {
-                return None;
-            }
+    /// Waits for the MQTT subscription and collects retained messages, then restores settings:
+    /// retained commands that arrived while we were not running are applied, and on first start
+    /// (no state file yet) our own retained state topics are used.
+    async fn initial_sync(&mut self, eventloop: &mut EventLoop) -> Result<()> {
+        let mut retained: HashMap<String, String> = HashMap::new();
+        let mut deadline = Instant::now() + SUBSCRIBE_TIMEOUT;
+        let mut subscribed = false;
 
-            // heater is currently inactive
-            if current_temp <= self.prefs.lower_bound {
-                settings.flow_temp_desired = 60;
-                return Some(settings);
-            }
-        } else if settings.flow_temp_desired != 0 {
-            // heater is active
-            if current_temp >= self.prefs.higher_bound {
-                settings.flow_temp_desired = 0;
-                return Some(settings);
+        loop {
+            let event = match timeout_at(deadline, eventloop.poll()).await {
+                Ok(event) => event.context("MQTT connection failed")?,
+                Err(_) if subscribed => break,
+                Err(_) => bail!(
+                    "MQTT subscription not acknowledged within {:?}",
+                    SUBSCRIBE_TIMEOUT
+                ),
+            };
+            match event {
+                Event::Incoming(Incoming::Publish(p)) if p.retain => {
+                    if let Some((topic, payload)) = decode(&p) {
+                        debug!("Retained {}: {}", topic, payload);
+                        retained.insert(topic.to_string(), payload.to_string());
+                    }
+                }
+                Event::Incoming(Incoming::SubAck(_)) => {
+                    subscribed = true;
+                    deadline = Instant::now() + RETAINED_WINDOW;
+                }
+                event => self.handle_mqtt_event(event)?,
             }
         }
 
-        None
-    }
+        let has_state = STATE_TOPICS.iter().any(|t| retained.contains_key(*t));
+        if !self.loaded_from_file && has_state {
+            info!("No saved settings, restoring from retained MQTT state");
+            for topic in STATE_TOPICS {
+                if let Some(payload) = retained.get(topic)
+                    && let Err(e) = self.restore_state(topic, payload)
+                {
+                    warn!("Ignoring retained {}={}: {:#}", topic, payload, e);
+                }
+            }
+            // the retained state already reflects these
+            for topic in COMMAND_TOPICS {
+                if let Some(payload) = retained.get(topic) {
+                    self.last_commands
+                        .insert(topic.to_string(), payload.clone());
+                }
+            }
+        } else {
+            for topic in COMMAND_TOPICS {
+                if let Some(payload) = retained.get(topic)
+                    && self.last_commands.get(topic) != Some(payload)
+                {
+                    self.handle_command(topic, payload);
+                }
+            }
+        }
 
-    async fn publish_settings(&self) -> Result<()> {
-        self.mqtt_tx
-            .send(("mode".to_string(), self.settings.hc_mode.to_string()))
-            .await?;
-        self.mqtt_tx
-            .send((
-                "temp/low".to_string(),
-                format!("{}", self.prefs.lower_bound),
-            ))
-            .await?;
-        self.mqtt_tx
-            .send((
-                "temp/high".to_string(),
-                format!("{}", self.prefs.higher_bound),
-            ))
-            .await?;
-        self.mqtt_tx
-            .send(("temp".to_string(), format!("{}", self.prefs.set_point)))
-            .await?;
+        info!("Settings: {}", self.describe());
+        self.save_state();
+        self.loaded_from_file = true;
         Ok(())
     }
 
-    async fn apply_settings(&mut self, settings: HeaterSettings) -> Result<()> {
-        match self.ebusd.apply_settings(settings.clone()).await {
-            Ok(_) => {
-                self.set_fails = 0;
+    fn handle_mqtt_event(&mut self, event: Event) -> Result<()> {
+        match event {
+            Event::Incoming(Incoming::Publish(p)) => {
+                if let Some((topic, payload)) = decode(&p)
+                    && COMMAND_TOPICS.contains(&topic)
+                {
+                    self.handle_command(topic, payload);
+                }
+            }
+            Event::Incoming(Incoming::ConnAck(_)) => info!("Connected to MQTT broker"),
+            Event::Incoming(Incoming::Disconnect) => bail!("MQTT broker disconnected"),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_command(&mut self, topic: &str, payload: &str) {
+        let result = match topic {
+            // a single set point also moves the band around it
+            "temp/set" => parse_temp(payload).map(|v| self.prefs.set_set_point(v)),
+            _ => self.restore_state(topic.trim_end_matches("/set"), payload),
+        };
+        if let Err(e) = result {
+            warn!("Ignoring invalid {} command {:?}: {:#}", topic, payload, e);
+            return;
+        }
+        if topic == "mode/set" {
+            // mode changes take effect immediately, regardless of the hold time
+            self.next_apply = Instant::now();
+        }
+
+        info!("{} {}: {}", topic, payload, self.describe());
+        self.last_commands
+            .insert(topic.to_string(), payload.to_string());
+        self.save_state();
+        self.publish_settings();
+        self.evaluate();
+    }
+
+    fn restore_state(&mut self, topic: &str, payload: &str) -> Result<()> {
+        match topic {
+            "temp" => self.prefs.set_point = parse_temp(payload)?,
+            "temp/low" => self.prefs.lower_bound = parse_temp(payload)?,
+            "temp/high" => self.prefs.higher_bound = parse_temp(payload)?,
+            "mode" => self.settings.hc_mode = payload.parse()?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn handle_temperature(&mut self, state: &Value) {
+        let temp = match state {
+            Value::Number(n) => n.as_f64().map(|v| v as f32),
+            Value::String(s) => f32::from_str(s).ok(),
+            _ => None,
+        };
+        let Some(temp) = temp.filter(|t| t.is_finite()) else {
+            warn!("Thermometer state is not a temperature: {}", state);
+            return;
+        };
+
+        if self.current_temperature == Some(temp) {
+            return;
+        }
+        debug!("Temp update: {}", temp);
+        self.current_temperature = Some(temp);
+        self.publish("temp/current", temp.to_string());
+        self.evaluate();
+    }
+
+    /// Decides whether the heater should be running and schedules an update if that changed.
+    fn evaluate(&mut self) {
+        let flow_temp = self.settings.flow_temp_desired;
+        let desired = if self.settings.hc_mode == HeaterMode::OFF {
+            0
+        } else {
+            match self.current_temperature {
+                Some(t) if flow_temp == 0 && t <= self.prefs.lower_bound => 60,
+                Some(t) if flow_temp != 0 && t >= self.prefs.higher_bound => 0,
+                _ => flow_temp,
+            }
+        };
+        if desired == flow_temp {
+            return;
+        }
+
+        debug!("Flow temp {} -> {}", flow_temp, desired);
+        self.settings.flow_temp_desired = desired;
+        // don't toggle the heater more often than maintain_state_for
+        let now = Instant::now();
+        let at = self
+            .last_flow_change
+            .map_or(now, |t| (t + self.prefs.maintain_state_for).max(now));
+        self.next_apply = self.next_apply.min(at);
+    }
+
+    async fn apply_settings(&mut self) {
+        match self.ebusd.apply_settings(&self.settings).await {
+            Ok(()) => {
+                let flow_temp = self.settings.flow_temp_desired;
+                if self.applied_flow_temp != Some(flow_temp) {
+                    self.applied_flow_temp = Some(flow_temp);
+                    self.last_flow_change = Some(Instant::now());
+                }
+                self.next_apply = Instant::now() + KEEPALIVE_INTERVAL;
             }
             Err(e) => {
-                error!("Failed applying settings: {:?}", e);
-                self.set_fails += 1;
-
-                match e.downcast_ref::<io::Error>() {
-                    None => {}
-                    Some(e) => {
-                        debug!("Original error: {}", e.to_string());
-                        let msg = e.to_string().to_lowercase();
-                        if msg.contains("broken pipe") || msg.contains("connection") {
-                            debug!("Reconnecting...");
-                            self.ebusd.reconnect().await?;
-                            self.ebusd.define_message( "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2".to_string()).await?;
-                        }
-                    }
-                }
-
-                if self.set_fails > 5 {
-                    tokio::time::sleep(Duration::from_secs(10 * 60)).await;
-                    self.set_fails = 0;
-                }
+                error!(
+                    "Failed to apply settings, retrying in {:?}: {:#}",
+                    RETRY_INTERVAL, e
+                );
+                self.next_apply = Instant::now() + RETRY_INTERVAL;
             }
         }
-        self.last_mode_set_time = Some(Instant::now());
-        self.settings = settings;
-        self.publish_settings().await?;
-        Ok(())
     }
 
-    fn set_temp_preference(&mut self, prefs: TemperaturePreferences) {
-        self.prefs = prefs;
+    fn describe(&self) -> String {
+        format!(
+            "mode {}, set point {}, low {}, high {}",
+            self.settings.hc_mode,
+            self.prefs.set_point,
+            self.prefs.lower_bound,
+            self.prefs.higher_bound
+        )
     }
 
-    pub async fn temperature_changes(&self) -> Result<Receiver<f32>> {
-        let mut event_rx = self.ha_api.state_updates().await?;
-        let (tx, rx) = channel(10);
-        let thermometer_entity = self.thermometer_entity.clone();
-
-        tokio::spawn(async move {
-            while let Some(event) = event_rx.recv().await {
-                if event.event_type != "state_changed" {
-                    continue;
-                }
-                if event.data.new_state.entity_id != thermometer_entity {
-                    continue;
-                }
-                let val = event.data.new_state.state;
-                let temp = match val {
-                    Value::Null => {
-                        continue;
-                    }
-                    Value::Bool(_) => {
-                        continue;
-                    }
-                    Value::Number(n) => n.as_f64().unwrap() as f32,
-                    Value::String(s) => f32::from_str(&s).unwrap(),
-                    Value::Array(_) => {
-                        continue;
-                    }
-                    Value::Object(_) => {
-                        continue;
-                    }
-                };
-                debug!("Temp update: {}", temp);
-                tx.send(temp).await.unwrap();
-            }
-        });
-
-        Ok(rx)
-    }
-
-    pub async fn handle_mqtt_message(&mut self, event: Event) -> Result<()> {
-        match event {
-            Event::Incoming(v) => match v {
-                Incoming::Publish(publish) => {
-                    let topic_parts: Vec<&str> = publish.topic.split('/').collect();
-                    match topic_parts[1] {
-                        "temp" => {
-                            if topic_parts.len() <= 2 {
-                                return Ok(());
-                            }
-
-                            match topic_parts[2] {
-                                "set" => {
-                                    self.prefs.set_point = f32::from_str(&String::from_utf8(
-                                        publish.payload.to_vec(),
-                                    )?)?;
-                                    info!("New temp set point: {}", self.prefs.set_point);
-                                    self.prefs.lower_bound =
-                                        self.prefs.set_point - self.prefs.temperature_band;
-                                    self.prefs.higher_bound =
-                                        self.prefs.set_point + self.prefs.temperature_band;
-                                    self.publish_settings().await?;
-                                }
-                                "high" => {
-                                    if topic_parts.len() < 4 || topic_parts[3] != "set" {
-                                        return Ok(());
-                                    }
-
-                                    self.prefs.higher_bound = f32::from_str(&String::from_utf8(
-                                        publish.payload.to_vec(),
-                                    )?)?;
-                                    info!("New temp higher bound: {}", self.prefs.higher_bound);
-                                    self.publish_settings().await?;
-                                }
-                                "low" => {
-                                    if topic_parts.len() < 4 || topic_parts[3] != "set" {
-                                        return Ok(());
-                                    }
-
-                                    self.prefs.lower_bound = f32::from_str(&String::from_utf8(
-                                        publish.payload.to_vec(),
-                                    )?)?;
-                                    info!("New temp lower bound: {}", self.prefs.lower_bound);
-                                    self.publish_settings().await?;
-                                }
-                                _ => {}
-                            }
-                        }
-                        "mode" => {
-                            if topic_parts.len() <= 2 {
-                                return Ok(());
-                            }
-
-                            match topic_parts[2] {
-                                "set" => {
-                                    self.settings.hc_mode = HeaterMode::from_str(
-                                        String::from_utf8(publish.payload.to_vec())?.as_str(),
-                                    )
-                                    .map_err(|_| anyhow!("Invalid heater mode"))?;
-                                    info!("New heater mode: {}", self.settings.hc_mode.to_string());
-
-                                    if self.settings.hc_mode == HeaterMode::OFF {
-                                        self.settings.flow_temp_desired = 0;
-                                    }
-
-                                    match self.apply_settings(self.settings.clone()).await {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            error!("Failed to apply settings: {:?}", e);
-                                        }
-                                    }
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Incoming::Disconnect => {
-                    bail!("MQTT disconnect")
-                }
-                _ => {}
-            },
-            Event::Outgoing(v) => {
-                debug!("OUT {:?}", v);
-            }
+    fn publish(&self, topic: &str, payload: String) {
+        let Some(client) = &self.mqtt else { return };
+        if let Err(e) = client.try_publish(
+            format!("{}{}", TOPIC_PREFIX, topic),
+            QoS::AtLeastOnce,
+            true,
+            payload,
+        ) {
+            error!("Failed to publish to {}: {:?}", topic, e);
         }
-        Ok(())
+    }
+
+    fn publish_settings(&self) {
+        self.publish("mode", self.settings.hc_mode.to_string());
+        self.publish("temp/low", self.prefs.lower_bound.to_string());
+        self.publish("temp/high", self.prefs.higher_bound.to_string());
+        self.publish("temp", self.prefs.set_point.to_string());
+    }
+
+    fn save_state(&self) {
+        let state = PersistedState {
+            mode: self.settings.hc_mode.clone(),
+            set_point: self.prefs.set_point,
+            lower_bound: self.prefs.lower_bound,
+            higher_bound: self.prefs.higher_bound,
+            last_commands: self.last_commands.clone(),
+        };
+        if let Err(e) = write_atomic(
+            &self.state_file,
+            &serde_json::to_vec_pretty(&state).unwrap(),
+        ) {
+            warn!(
+                "Failed to save settings to {}: {:#}",
+                self.state_file.display(),
+                e
+            );
+        }
     }
 }
 
-#[derive(Parser, Debug, Serialize, Deserialize)]
+fn load_state(path: &Path) -> Option<PersistedState> {
+    let data = match std::fs::read(path) {
+        Ok(v) => v,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            warn!("Failed to read {}: {}", path.display(), e);
+            return None;
+        }
+    };
+    match serde_json::from_slice(&data) {
+        Ok(v) => Some(v),
+        Err(e) => {
+            warn!("Ignoring invalid state file {}: {}", path.display(), e);
+            None
+        }
+    }
+}
+
+fn write_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Splits one of our publishes into its topic (without prefix) and trimmed payload.
+fn decode(p: &Publish) -> Option<(&str, &str)> {
+    let topic = p.topic.strip_prefix(TOPIC_PREFIX)?;
+    match std::str::from_utf8(&p.payload) {
+        Ok(payload) => Some((topic, payload.trim())),
+        Err(e) => {
+            warn!("Ignoring non UTF-8 payload on {}: {}", p.topic, e);
+            None
+        }
+    }
+}
+
+fn parse_temp(payload: &str) -> Result<f32> {
+    let v = f32::from_str(payload)?;
+    if !v.is_finite() {
+        bail!("not a finite temperature");
+    }
+    Ok(v)
+}
+
+#[derive(Parser, Debug)]
 pub struct Options {
-    #[arg(long)]
-    ha_api_address: Option<String>,
+    #[arg(long, default_value = "http://supervisor/core")]
+    ha_api_address: String,
     #[arg(long)]
     ha_ws_address: Option<String>,
     #[arg(long)]
@@ -636,4 +604,7 @@ pub struct Options {
     mqtt_username: String,
     #[arg(long)]
     mqtt_password: String,
+    /// Where climate settings are persisted across restarts
+    #[arg(long, default_value = "/data/state.json")]
+    state_file: PathBuf,
 }

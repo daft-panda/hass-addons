@@ -1,75 +1,96 @@
 use crate::HeaterSettings;
-use anyhow::bail;
-use log::debug;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use anyhow::{Context, bail};
+use log::{debug, info};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
 
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
+const SET_MODE_DEFINITION: &str = "wi,BAI,SetModeOverride,OperatingMode,,08,B510,00,hcmode,,UCH,,,,flowtempdesired,,D1C,,,,hwctempdesired,,D1C,,,,hwcflowtempdesired,,UCH,,,,setmode1,,UCH,,,,disablehc,,BI0,,,,disablehwctapping,,BI1,,,,disablehwcload,,BI2,,,,setmode2,,UCH,,,,remoteControlHcPump,,BI0,,,,releaseBackup,,BI1,,,,releaseCooling,,BI2";
+
+/// Client for the ebusd TCP command port. The connection is opened lazily and dropped on any
+/// error, so the next command transparently reconnects (and re-defines our custom message).
 pub struct Ebusd {
     endpoint: String,
-    connection: TcpStream,
+    connection: Option<BufReader<TcpStream>>,
 }
 
 impl Ebusd {
-    pub async fn new(endpoint: String) -> anyhow::Result<Self> {
-        let stream = TcpStream::connect(endpoint.clone()).await?;
-
-        Ok(Self {
+    pub fn new(endpoint: String) -> Self {
+        Self {
             endpoint,
-            connection: stream,
-        })
-    }
-    pub async fn define_message(&mut self, message_definition: String) -> anyhow::Result<()> {
-        self.connection
-            .write_all(format!("define -r {}\n", message_definition).as_bytes())
-            .await?;
-
-        let mut buffer = [0; 1024];
-        let bytes_read = match timeout(READ_TIMEOUT, self.connection.read(&mut buffer)).await {
-            Ok(r) => r?,
-            Err(_) => bail!(
-                "ebusd define_message read timed out after {:?}",
-                READ_TIMEOUT
-            ),
-        };
-        let result = String::from_utf8(Vec::from(&buffer[..bytes_read]))?;
-        let result = result.trim();
-        debug!("Define message: {}", result);
-        if result.contains("done") {
-            Ok(())
-        } else {
-            bail!("{}", result);
+            connection: None,
         }
     }
 
-    pub async fn apply_settings(&mut self, mode: HeaterSettings) -> anyhow::Result<()> {
-        let arg = mode.into_cmd_arg();
+    pub async fn apply_settings(&mut self, settings: &HeaterSettings) -> anyhow::Result<()> {
+        let arg = settings.to_cmd_arg();
         debug!("Setting mode {}", arg);
-        let cmd = format!("w -c bai SetModeOverride {}\n", arg);
-        self.connection.write_all(cmd.as_bytes()).await?;
-
-        let mut buffer = [0; 1024];
-        let bytes_read = match timeout(READ_TIMEOUT, self.connection.read(&mut buffer)).await {
-            Ok(r) => r?,
-            Err(_) => bail!(
-                "ebusd apply_settings read timed out after {:?}",
-                READ_TIMEOUT
-            ),
-        };
-        let result = String::from_utf8(Vec::from(&buffer[..bytes_read]))?;
-        let result = result.trim();
+        let result = self
+            .request(&format!("w -c bai SetModeOverride {}", arg))
+            .await?;
         debug!("Set mode result: {}", result);
-        if result.contains("error") {
+        let lower = result.to_lowercase();
+        if lower.starts_with("err") || lower.contains("error") {
             bail!("Set mode {} failed: {}", arg, result);
-        } else {
-            Ok(())
         }
+        Ok(())
     }
 
-    pub async fn reconnect(&mut self) -> anyhow::Result<()> {
-        self.connection = TcpStream::connect(self.endpoint.clone()).await?;
-        Ok(())
+    async fn request(&mut self, cmd: &str) -> anyhow::Result<String> {
+        let conn = match &mut self.connection {
+            Some(conn) => conn,
+            None => self.connection.insert(self.connect().await?),
+        };
+        let result = Self::command(conn, cmd).await;
+        if result.is_err() {
+            // the stream may be half-read or dead, start over on the next request
+            self.connection = None;
+        }
+        result
+    }
+
+    async fn connect(&self) -> anyhow::Result<BufReader<TcpStream>> {
+        let stream = timeout(CONNECT_TIMEOUT, TcpStream::connect(&self.endpoint))
+            .await
+            .with_context(|| format!("connecting to ebusd at {} timed out", self.endpoint))?
+            .with_context(|| format!("connecting to ebusd at {}", self.endpoint))?;
+        let mut conn = BufReader::new(stream);
+
+        let result =
+            Self::command(&mut conn, &format!("define -r {}", SET_MODE_DEFINITION)).await?;
+        debug!("Define message: {}", result);
+        if !result.contains("done") {
+            bail!("ebusd rejected message definition: {}", result);
+        }
+        info!("Connected to ebusd at {}", self.endpoint);
+        Ok(conn)
+    }
+
+    /// Sends a command and reads the response, which ebusd terminates with an empty line.
+    async fn command(conn: &mut BufReader<TcpStream>, cmd: &str) -> anyhow::Result<String> {
+        conn.get_mut()
+            .write_all(format!("{}\n", cmd).as_bytes())
+            .await
+            .context("writing to ebusd")?;
+
+        let mut response = String::new();
+        loop {
+            let mut line = String::new();
+            let n = timeout(READ_TIMEOUT, conn.read_line(&mut line))
+                .await
+                .with_context(|| format!("ebusd read timed out after {:?}", READ_TIMEOUT))?
+                .context("reading from ebusd")?;
+            if n == 0 {
+                bail!("ebusd closed the connection");
+            }
+            if line.trim().is_empty() {
+                break;
+            }
+            response.push_str(&line);
+        }
+        Ok(response.trim().to_string())
     }
 }

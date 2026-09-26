@@ -1,66 +1,25 @@
-use anyhow::bail;
+use anyhow::{Context, anyhow, bail};
+use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use log::{debug, error, trace};
-use reqwest::{Client, Url};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::str::FromStr;
-use time::OffsetDateTime;
-use tokio::sync::mpsc::Receiver;
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message::Text;
+use log::{debug, error, trace, warn};
+use reqwest::{Client, StatusCode};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tokio::net::TcpStream;
+use tokio::select;
+use tokio::sync::mpsc::{Receiver, Sender, channel};
+use tokio::time::{Duration, Instant, interval, timeout};
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-#[serde(transparent)]
-pub struct Namespaces {
-    pub(crate) namespaces: Vec<Devices>,
-}
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const PING_INTERVAL: Duration = Duration::from_secs(30);
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Devices {
-    #[serde(flatten)]
-    pub(crate) devices: HashMap<String, Device>,
-}
+type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Device {
-    pub(crate) name: String,
-    pub(crate) entities: Vec<Vec<String>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct HaMessage {
-    pub(crate) id: u8,
-    #[serde(alias = "type")]
-    pub(crate) msg_type: String,
-    pub(crate) event: Event,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Event {
-    pub(crate) event_type: String,
-    pub(crate) data: EventData,
-    pub(crate) origin: String,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) time_fired: OffsetDateTime,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct EventData {
-    pub(crate) old_state: State,
-    pub(crate) new_state: State,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug)]
 pub struct State {
-    pub(crate) entity_id: String,
-    pub(crate) state: Value,
-    pub(crate) attributes: HashMap<String, Value>,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) last_changed: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub(crate) last_updated: OffsetDateTime,
+    pub state: Value,
 }
 
 pub struct Api {
@@ -80,131 +39,139 @@ impl Api {
         }
     }
 
-    pub async fn get_devices(&self) -> anyhow::Result<Vec<Device>> {
-        let template = "{\"template\": \"{% set devices = states | map(attribute='entity_id') | map('device_id') | unique | reject('eq',None) | list %}{%- set ns = namespace(devices = []) %}{%- for device in devices %} {%- set entities = device_entities(device) | list %}{%- if entities %}{%- set ns.devices = ns.devices +  [ {device: {\\\"name\\\": device_attr(device, \\\"name\\\"), \\\"entities\\\":[entities ]}} ] %}{%- endif %}{%- endfor %}{{ ns.devices }}\"}";
-        let req = self
+    /// Returns the current state of an entity, or None if it does not exist.
+    pub async fn get_state(&self, entity_id: &str) -> anyhow::Result<Option<State>> {
+        let res = self
             .client
-            .post(Url::from_str(&format!(
-                "{}/api/template",
-                self.url.clone()
-            ))?)
-            .bearer_auth(self.bearer_token.clone())
-            .body(template.to_string())
-            .build()?;
-        let res = self.client.execute(req).await?;
-        let mut bytes = String::from_utf8(Vec::from(res.bytes().await?))?;
-        // the API does not produce valid JSON (uses single quotes). this 'fixes' it except for when
-        // there is a value using single quotes in which case it breaks it in a new way
-        bytes = bytes.replace('\'', "\"");
-        trace!("{}", bytes);
-        let ns: Namespaces = serde_json::from_str(&bytes)?;
-        let devices: Vec<Device> = ns
-            .namespaces
-            .into_iter()
-            .flat_map(|d| d.devices.into_values().collect::<Vec<Device>>())
-            .collect();
-
-        Ok(devices)
+            .get(format!("{}/api/states/{}", self.url, entity_id))
+            .bearer_auth(&self.bearer_token)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("requesting entity state from HA")?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let body = res.error_for_status()?.bytes().await?;
+        Ok(Some(serde_json::from_slice(&body)?))
     }
 
-    pub async fn state_updates(&self) -> anyhow::Result<Receiver<Event>> {
-        let url = format!("{}/websocket", self.ws_url.clone().replace("http", "ws"));
-        let (ws, _) = connect_async(url).await?;
+    /// Streams state changes of a single entity. The channel closes when the websocket
+    /// connection to HA is lost or stops answering pings.
+    pub async fn state_updates(&self, entity_id: String) -> anyhow::Result<Receiver<State>> {
+        let url = format!("{}/websocket", self.ws_url.replace("http", "ws"));
+        let (ws, _) = timeout(REQUEST_TIMEOUT, connect_async(url))
+            .await
+            .context("connecting to HA websocket timed out")??;
         let (mut write, mut read) = ws.split();
-        // await auth required message
-        let msg = read.next().await.unwrap()?;
-        if let Text(str) = msg {
-            trace!("{}", str);
-            if !str.contains("auth_required") {
-                bail!("Invalid ws handshake");
-            }
-        } else {
-            bail!("Invalid ws handshake");
+
+        let msg = next_json(&mut read).await?;
+        if msg["type"] != "auth_required" {
+            bail!("Invalid ws handshake: {}", msg);
         }
 
         write
-            .send(Text(
-                r#"
-{
-  "type": "auth",
-  "access_token": "blurg"
-}
-        "#
-                .replace("blurg", &self.bearer_token)
-                .into(),
+            .send(Message::text(
+                json!({"type": "auth", "access_token": self.bearer_token}).to_string(),
             ))
             .await?;
-
-        let msg = read.next().await.unwrap()?;
-        if let Text(str) = msg {
-            trace!("{}", str);
-            if !str.contains("auth_ok") {
-                bail!("Invalid ws auth credentials: {:?}", str);
-            }
-        } else {
-            bail!("Invalid ws handshake");
+        let msg = next_json(&mut read).await?;
+        if msg["type"] != "auth_ok" {
+            bail!("Invalid ws auth credentials: {}", msg);
         }
 
         write
-            .send(Text(
-                r#"
-{
-  "id": 18,
-  "type": "subscribe_events",
-  "event_type": "state_changed"
-}
-        "#
-                .to_string()
-                .into(),
+            .send(Message::text(
+                json!({"id": 1, "type": "subscribe_events", "event_type": "state_changed"})
+                    .to_string(),
             ))
             .await?;
-
-        let msg = read.next().await.unwrap()?;
-        if let Text(str) = msg {
-            trace!("{}", str);
-            if !str.contains("success\":true") {
-                bail!("Failed to subscribe: {:?}", str);
-            }
-        } else {
-            bail!("Unexpected ws message type: {:?}", msg);
+        let msg = next_json(&mut read).await?;
+        if msg["success"] != true {
+            bail!("Failed to subscribe: {}", msg);
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(10);
-
+        let (tx, rx) = channel(10);
         tokio::spawn(async move {
-            read.for_each(|msg| async {
-                let msg = match msg {
-                    Ok(v) => match v.into_text() {
-                        Ok(v) => v,
-                        Err(e) => {
-                            debug!("Failed to convert WS message into text: {}", e);
-                            return;
-                        }
-                    },
-                    Err(e) => {
-                        debug!("Failed to read WS message: {}", e);
-                        return;
-                    }
-                };
-
-                if msg.is_empty() {
-                    trace!("Empty WS message received");
-                    return;
-                }
-
-                let ha_msg: HaMessage = match serde_json::from_str(&msg) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("Failed to unmarshal HA state update: {}\n{}", e, msg);
-                        return;
-                    }
-                };
-                trace!("State update event: {:?}", ha_msg);
-                tx.send(ha_msg.event).await.unwrap();
-            })
-            .await;
+            if let Err(e) = pump(write, read, entity_id, tx).await {
+                error!("HA websocket connection lost: {:#}", e);
+            }
         });
 
         Ok(rx)
+    }
+}
+
+async fn next_json(read: &mut SplitStream<Ws>) -> anyhow::Result<Value> {
+    loop {
+        let msg = timeout(REQUEST_TIMEOUT, read.next())
+            .await
+            .context("timed out waiting for HA websocket")?
+            .ok_or_else(|| anyhow!("HA websocket closed"))??;
+        if let Message::Text(text) = msg {
+            trace!("{}", text);
+            return Ok(serde_json::from_str(text.as_str())?);
+        }
+    }
+}
+
+async fn pump(
+    mut write: SplitSink<Ws, Message>,
+    mut read: SplitStream<Ws>,
+    entity_id: String,
+    tx: Sender<State>,
+) -> anyhow::Result<()> {
+    let mut ping = interval(PING_INTERVAL);
+    let mut ping_id: u64 = 1;
+    let mut last_seen = Instant::now();
+
+    loop {
+        select! {
+            msg = read.next() => {
+                let msg = msg.ok_or_else(|| anyhow!("connection closed"))??;
+                last_seen = Instant::now();
+                let text = match msg {
+                    Message::Text(text) => text,
+                    Message::Close(frame) => bail!("closed by HA: {:?}", frame),
+                    _ => continue,
+                };
+                // we get every state change in HA, skip the ones that can't be ours before parsing
+                if !text.as_str().contains(entity_id.as_str()) {
+                    continue;
+                }
+                let value: Value = match serde_json::from_str(text.as_str()) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        warn!("Failed to parse HA websocket message: {}\n{}", e, text);
+                        continue;
+                    }
+                };
+                if value["type"] != "event" {
+                    trace!("HA websocket message: {}", value);
+                    continue;
+                }
+                let new_state = &value["event"]["data"]["new_state"];
+                if new_state["entity_id"] != entity_id.as_str() {
+                    continue;
+                }
+                match State::deserialize(new_state) {
+                    Ok(state) => {
+                        if tx.send(state).await.is_err() {
+                            return Ok(());
+                        }
+                    }
+                    Err(e) => warn!("Failed to parse state of {}: {}", entity_id, e),
+                }
+            }
+            _ = ping.tick() => {
+                if last_seen.elapsed() > PING_INTERVAL * 3 {
+                    bail!("no messages from HA for {:?}", last_seen.elapsed());
+                }
+                ping_id += 1;
+                debug!("Sending HA websocket ping");
+                write.send(Message::text(json!({"id": ping_id, "type": "ping"}).to_string())).await?;
+            }
+            _ = tx.closed() => return Ok(()),
+        }
     }
 }

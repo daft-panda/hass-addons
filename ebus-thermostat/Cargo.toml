@@ -1,22 +1,20 @@
 [package]
 name = "ebus-thermostat"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rustls = { version = "0.23.5", features = ["logging", "std", "ring"], default-features = false }
+rustls = { version = "0.23.45", features = ["logging", "std", "ring"], default-features = false }
 rumqttc = { version = "0.25.1", features = ["use-rustls"] }
-tokio = { version = "1.34.0", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
-tokio-tungstenite = { version = "*", features = ["rustls-tls-native-roots"] }
-reqwest = { version = "0.13.1", default-features=false, features = ["rustls"] }
-serde = { version = "1.0.192", features = ["derive"] }
-serde_json = { version = "1.0.108" }
-anyhow = "1.0.75"
-futures-util = "0.3.29"
-time = { version = "0.3.45", features = ["serde-well-known"] }
-env_logger = "0.11.6"
-log = "0.4.20"
-clap = { version = "4.4.8", features = ["derive"] }
-console-subscriber = "0.5.0"
+tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "sync", "net", "time", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+reqwest = { version = "0.13.5", default-features=false, features = ["rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151" }
+anyhow = "1.0.104"
+futures-util = "0.3.34"
+env_logger = "0.11.11"
+log = "0.4.34"
+clap = { version = "4.6.7", features = ["derive"] }

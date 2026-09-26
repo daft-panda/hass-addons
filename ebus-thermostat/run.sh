@@ -26,18 +26,17 @@ fi
 if bashio::config.has_value 'ebusd_address'; then
     ARGS+=(--ebusd-address "$(bashio::config 'ebusd_address')")
 else
-    # Try to find ebusd add-on via supervisor API
-    EBUSD_ADDON=$(bashio::api.supervisor GET "/addons" false '.addons[] | select(.slug | endswith("_ebusd") or . == "local_ebusd") | .slug' 2>/dev/null | head -1)
-    if [[ -n "${EBUSD_ADDON}" ]]; then
-        # Convert slug to hostname (replace _ with -)
-        EBUSD_HOST="${EBUSD_ADDON//_/-}"
-        ARGS+=(--ebusd-address "${EBUSD_HOST}:8888")
-        bashio::log.info "Auto-discovered ebusd at: ${EBUSD_HOST}:8888"
-    else
-        bashio::log.fatal "No ebusd_address configured and could not auto-discover ebusd add-on"
-        bashio::log.fatal "Please set ebusd_address in the add-on configuration"
-        bashio::exit.nok
-    fi
+    # Try to find ebusd add-on via supervisor API, it may not be installed/listed yet during boot
+    until EBUSD_ADDON=$(bashio::api.supervisor GET "/addons" false '.addons[] | select(.slug | endswith("_ebusd") or . == "local_ebusd") | .slug' 2>/dev/null | head -1) \
+        && [[ -n "${EBUSD_ADDON}" ]]; do
+        bashio::log.warning "No ebusd_address configured and could not auto-discover ebusd add-on, retrying in 30s"
+        bashio::log.warning "Set ebusd_address in the add-on configuration if ebusd does not run as an add-on"
+        sleep 30
+    done
+    # Convert slug to hostname (replace _ with -)
+    EBUSD_HOST="${EBUSD_ADDON//_/-}"
+    ARGS+=(--ebusd-address "${EBUSD_HOST}:8888")
+    bashio::log.info "Auto-discovered ebusd at: ${EBUSD_HOST}:8888"
 fi
 
 if bashio::config.has_value 'thermometer_entity'; then
@@ -60,6 +59,6 @@ if bashio::config.has_value 'ha_api_token'; then
     ARGS+=(--ha-api-token "$(bashio::config 'ha_api_token')")
 fi
 
-bashio::log.info "Starting ebus-thermostat with args: ${ARGS[*]}"
+bashio::log.info "Starting ebus-thermostat"
 
 exec /usr/local/bin/ebus-thermostat "${ARGS[@]}"
