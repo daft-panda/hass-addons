@@ -14,6 +14,11 @@ on:
 permissions:
   contents: read
 
+# Don't let two pushes race to publish the same tags
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   init:
     runs-on: ubuntu-latest

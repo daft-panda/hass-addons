@@ -2,6 +2,9 @@ name: "ebusd thermostat"
 version: "0.3.0"
 slug: ebusd_thermostat
 description: "Control your ebus heater connected via ebusd"
+url: "https://github.com/daft-panda/hass-addons/tree/main/ebus-thermostat"
+# Prebuilt by CI (.github/workflows/build-addon.yaml), tagged with the version above
+image: "ghcr.io/daft-panda/ebus-thermostat"
 init: false
 arch:
   - amd64
